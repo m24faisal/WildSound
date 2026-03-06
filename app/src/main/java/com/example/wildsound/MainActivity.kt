@@ -4,6 +4,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -32,6 +33,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.wildsound.ui.theme.WildSoundTheme
@@ -123,13 +125,21 @@ fun HomeScreen() {
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
     ) {
-        // Green circle in the middle
+        // Green circle with logo inside
         Box(
             modifier = Modifier
                 .size(150.dp)
                 .clip(CircleShape)
-                .background(Color(0xFF2E7D32))
-        )
+                .background(Color(0xFF2E7D32)),
+            contentAlignment = Alignment.Center
+        ) {
+            // Your logo.png image
+            Image(
+                painter = painterResource(id = R.drawable.logo),
+                contentDescription = "Wild Sound Logo",
+                modifier = Modifier.size(100.dp)
+            )
+        }
     }
 }
 
