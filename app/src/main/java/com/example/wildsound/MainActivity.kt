@@ -4,36 +4,42 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.material3.ripple
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.wildsound.ui.theme.WildSoundTheme
@@ -118,27 +124,141 @@ fun WildSoundTopBar() {
     )
 }
 
-// Screen composables for each bottom nav item
 @Composable
 fun HomeScreen() {
+    // State to track if we're in "listening" mode
+    var isListening by remember { mutableStateOf(false) }
+
+    // Create and remember the interaction source for ripple effect
+    val interactionSource = remember { MutableInteractionSource() }
+
+    // Animation for the pulsing effect (idle state)
+    val infiniteTransition = rememberInfiniteTransition()
+    val pulseScale by infiniteTransition.animateFloat(
+        initialValue = 1f,
+        targetValue = 1.1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1000, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        )
+    )
+
+    // Animation for the wave emission effect (listening state)
+    val waveTransition = rememberInfiniteTransition()
+    val waveScale by waveTransition.animateFloat(
+        initialValue = 1f,
+        targetValue = 2.5f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1500, easing = FastOutLinearInEasing)
+        )
+    )
+    val waveAlpha by waveTransition.animateFloat(
+        initialValue = 0.7f,
+        targetValue = 0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1500, easing = FastOutLinearInEasing)
+        )
+    )
+
     Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center
+        modifier = Modifier.fillMaxSize()
     ) {
-        // Green circle with logo inside
-        Box(
-            modifier = Modifier
-                .size(150.dp)
-                .clip(CircleShape)
-                .background(Color(0xFF2E7D32)),
-            contentAlignment = Alignment.Center
+        // Exit button (X) - only visible when listening
+        if (isListening) {
+            IconButton(
+                onClick = {
+                    // ONLY the X button can stop listening
+                    isListening = false
+                },
+                modifier = Modifier
+                    .padding(16.dp)
+                    .size(48.dp)
+                    .align(Alignment.TopStart)
+                    .background(Color(0xFF2E7D32).copy(alpha = 0.2f), CircleShape)
+                    .clip(CircleShape)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Stop Listening",
+                    tint = Color(0xFF2E7D32),
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+        }
+
+        // Main content centered
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
         ) {
-            // Your logo.png image
-            Image(
-                painter = painterResource(id = R.drawable.logo),
-                contentDescription = "Wild Sound Logo",
-                modifier = Modifier.size(100.dp)
+            // Message above the button
+            Text(
+                text = if (isListening) "Listening..." else "Tap to go Wild!",
+                color = Color(0xFF2E7D32),
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.padding(bottom = 32.dp)
             )
+
+            // Container for button and waves
+            Box(
+                contentAlignment = Alignment.Center
+            ) {
+                // Wave emission rings (only visible when listening)
+                if (isListening) {
+                    // Multiple rings for richer effect
+                    for (i in 0..2) {
+                        Box(
+                            modifier = Modifier
+                                .size(150.dp * (1f + i * 0.3f))
+                                .scale(waveScale - (i * 0.3f))
+                                .clip(CircleShape)
+                                .background(
+                                    Color(0xFF2E7D32).copy(
+                                        alpha = waveAlpha * (1f - i * 0.2f)
+                                    )
+                                )
+                        )
+                    }
+                }
+
+                // Main clickable button - ONLY STARTS LISTENING, NEVER STOPS
+                Box(
+                    modifier = Modifier
+                        .scale(if (isListening) 1f else pulseScale)
+                        .clip(CircleShape)
+                        .clickable(
+                            interactionSource = interactionSource,
+                            indication = ripple(
+                                color = Color.White,
+                                bounded = true
+                            )
+                        ) {
+                            // Only start listening if not already listening
+                            if (!isListening) {
+                                isListening = true
+                            }
+                            // Removed the else clause that was stopping it
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    // Green circle background
+                    Box(
+                        modifier = Modifier
+                            .size(150.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF2E7D32))
+                    )
+
+                    // Logo on top
+                    Image(
+                        painter = painterResource(id = R.drawable.logo),
+                        contentDescription = "Wild Sound Logo",
+                        modifier = Modifier.size(100.dp)
+                    )
+                }
+            }
         }
     }
 }
