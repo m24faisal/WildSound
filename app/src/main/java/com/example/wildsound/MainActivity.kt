@@ -1,9 +1,17 @@
 package com.example.wildsound
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -21,6 +29,8 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -38,10 +48,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import com.example.wildsound.ui.theme.WildSoundTheme
 
 class MainActivity : ComponentActivity() {
@@ -129,6 +141,39 @@ fun HomeScreen() {
     // State to track if we're in "listening" mode
     var isListening by remember { mutableStateOf(false) }
 
+    // Permission state
+    var showPermissionDialog by remember { mutableStateOf(false) }
+    var isPermanentlyDenied by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+
+    // Check if permission is already granted
+    val isPermissionGranted = remember {
+        ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    // Permission launcher
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            // Permission granted - start listening
+            isListening = true
+        } else {
+            // Check if permanently denied with API level check
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val activity = context as ComponentActivity
+                isPermanentlyDenied = !activity.shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)
+            } else {
+                // Below API 23, permissions are granted at install time
+                isPermanentlyDenied = false
+            }
+            showPermissionDialog = true
+        }
+    }
+
     // Create and remember the interaction source for ripple effect
     val interactionSource = remember { MutableInteractionSource() }
 
@@ -167,7 +212,6 @@ fun HomeScreen() {
         if (isListening) {
             IconButton(
                 onClick = {
-                    // ONLY the X button can stop listening
                     isListening = false
                 },
                 modifier = Modifier
@@ -192,7 +236,7 @@ fun HomeScreen() {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            // Message above the button
+            // Message above the button - REMOVED the microphone required message
             Text(
                 text = if (isListening) "Listening..." else "Tap to go Wild!",
                 color = Color(0xFF2E7D32),
@@ -207,23 +251,27 @@ fun HomeScreen() {
             ) {
                 // Wave emission rings (only visible when listening)
                 if (isListening) {
+                    // Use the animation values
+                    val currentWaveScale = waveScale
+                    val currentWaveAlpha = waveAlpha
+
                     // Multiple rings for richer effect
                     for (i in 0..2) {
                         Box(
                             modifier = Modifier
                                 .size(150.dp * (1f + i * 0.3f))
-                                .scale(waveScale - (i * 0.3f))
+                                .scale(currentWaveScale - (i * 0.3f))
                                 .clip(CircleShape)
                                 .background(
                                     Color(0xFF2E7D32).copy(
-                                        alpha = waveAlpha * (1f - i * 0.2f)
+                                        alpha = currentWaveAlpha * (1f - i * 0.2f)
                                     )
                                 )
                         )
                     }
                 }
 
-                // Main clickable button - ONLY STARTS LISTENING, NEVER STOPS
+                // Main clickable button
                 Box(
                     modifier = Modifier
                         .scale(if (isListening) 1f else pulseScale)
@@ -235,11 +283,16 @@ fun HomeScreen() {
                                 bounded = true
                             )
                         ) {
-                            // Only start listening if not already listening
+                            // Handle button click with permission check
                             if (!isListening) {
-                                isListening = true
+                                if (isPermissionGranted) {
+                                    // Permission already granted - start listening
+                                    isListening = true
+                                } else {
+                                    // Need to request permission first
+                                    permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                }
                             }
-                            // Removed the else clause that was stopping it
                         },
                     contentAlignment = Alignment.Center
                 ) {
@@ -260,6 +313,55 @@ fun HomeScreen() {
                 }
             }
         }
+    }
+
+    // Permission dialog
+    if (showPermissionDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                showPermissionDialog = false
+            },
+            title = {
+                Text(text = "Microphone Permission Required")
+            },
+            text = {
+                Text(
+                    text = if (isPermanentlyDenied) {
+                        "Microphone permission is permanently denied. Please enable it in app settings to use Wild Sound."
+                    } else {
+                        "Wild Sound needs microphone access to listen and identify music around you."
+                    }
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showPermissionDialog = false
+                        if (isPermanentlyDenied) {
+                            // Open app settings
+                            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                data = Uri.fromParts("package", context.packageName, null)
+                            }
+                            context.startActivity(intent)
+                        } else {
+                            // Request permission again
+                            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        }
+                    }
+                ) {
+                    Text(text = if (isPermanentlyDenied) "Open Settings" else "Request Permission")
+                }
+            },
+            dismissButton = {
+                Button(
+                    onClick = {
+                        showPermissionDialog = false
+                    }
+                ) {
+                    Text(text = "Cancel")
+                }
+            }
+        )
     }
 }
 
