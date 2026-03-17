@@ -15,7 +15,7 @@ from datetime import datetime
 
 # Configuration
 API_BASE = "https://api.inaturalist.org/v1"
-USER_AGENT = "WildSoundDatasetBuilder/1.0"
+USER_AGENT = "WildSoundDatasetBuilder/1.0 (educational project; contact: your-email@example.com)"
 RATE_LIMIT_DELAY = 3  # seconds between API calls (tested safe value)
 MAX_RETRIES = 3
 INITIAL_RETRY_DELAY = 5  # seconds
@@ -186,7 +186,8 @@ def get_recordings_for_species(taxon_id, max_recordings=5):
     for obs in data['results']:
         if 'sounds' in obs:
             for sound in obs['sounds']:
-                if 'file_url' in sound:
+                # Check if file_url exists and is not None
+                if 'file_url' in sound and sound['file_url'] is not None:
                     recordings.append({
                         "observation_id": obs['id'],
                         "file_url": sound['file_url'].replace("http://", "https://"),
@@ -295,6 +296,10 @@ def build_dataset(output_dir="animal_sounds", max_recordings_per_species=5):
             print(f"\n  Wild [{species_idx}/{len(wild_species)}]: {species['common_name']} ({species['scientific_name']})")
             recordings = get_recordings_for_species(species['taxon_id'], max_recordings_per_species)
             
+            if not recordings:
+                print(f"    No valid recordings found (skipping)")
+                continue
+            
             species_recordings = []
             for i, rec in enumerate(recordings, 1):
                 file_ext = os.path.splitext(rec['file_url'])[1] or '.mp3'
@@ -316,13 +321,14 @@ def build_dataset(output_dir="animal_sounds", max_recordings_per_species=5):
                 else:
                     failed_downloads += 1
             
-            continent_metadata["wild"].append({
-                "scientific_name": species['scientific_name'],
-                "common_name": species['common_name'],
-                "observation_count": species['observation_count'],
-                "recordings": species_recordings
-            })
-            total_wild_species += 1
+            if species_recordings:
+                continent_metadata["wild"].append({
+                    "scientific_name": species['scientific_name'],
+                    "common_name": species['common_name'],
+                    "observation_count": species['observation_count'],
+                    "recordings": species_recordings
+                })
+                total_wild_species += 1
         
         # 2. Get domestic species
         domestic_species = get_domestic_species_for_continent(continent_name, place_id, limit=20)
@@ -342,6 +348,10 @@ def build_dataset(output_dir="animal_sounds", max_recordings_per_species=5):
             
             recordings = get_recordings_for_species(taxon_id, max_recordings_per_species)
             
+            if not recordings:
+                print(f"    No valid recordings found (skipping)")
+                continue
+            
             species_recordings = []
             for i, rec in enumerate(recordings, 1):
                 file_ext = os.path.splitext(rec['file_url'])[1] or '.mp3'
@@ -363,13 +373,14 @@ def build_dataset(output_dir="animal_sounds", max_recordings_per_species=5):
                 else:
                     failed_downloads += 1
             
-            continent_metadata["domestic"].append({
-                "scientific_name": species['scientific_name'],
-                "common_name": species['common_name'],
-                "observation_count": species['observation_count'],
-                "recordings": species_recordings
-            })
-            total_domestic_species += 1
+            if species_recordings:
+                continent_metadata["domestic"].append({
+                    "scientific_name": species['scientific_name'],
+                    "common_name": species['common_name'],
+                    "observation_count": species['observation_count'],
+                    "recordings": species_recordings
+                })
+                total_domestic_species += 1
         
         # Save continent metadata
         metadata["continents"][continent_name] = continent_metadata
