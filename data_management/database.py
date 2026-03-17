@@ -16,7 +16,7 @@ from datetime import datetime
 # Configuration
 API_BASE = "https://api.inaturalist.org/v1"
 USER_AGENT = "WildSoundDatasetBuilder/1.0"
-RATE_LIMIT_DELAY = 1.01  # seconds between API calls (tested safe value)
+RATE_LIMIT_DELAY = 3  # seconds between API calls (tested safe value)
 MAX_RETRIES = 3
 INITIAL_RETRY_DELAY = 5  # seconds
 
