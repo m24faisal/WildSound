@@ -1,392 +1,515 @@
 #!/usr/bin/env python3
 """
-Wild Sound Model Trainer for Perch 2.0
-Fine-tunes a linear classifier on top of Perch 2.0 embeddings for your 667 species.
-Outputs: animal_classifier.tflite and labels.txt for Android integration.
+Wild Sound - Perch 2.0 Fine-Tuning Script
+Trains a linear classifier on top of Perch 2.0 embeddings for 667 animal species.
+CORRECTED VERSION - Fixed import paths and API compatibility
 """
 
 import os
 import sys
-import shutil
-import random
-import glob
 import numpy as np
-import tensorflow as tf
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
 import soundfile as sf
 import resampy
 from pathlib import Path
-from sklearn.model_selection import train_test_split
 import argparse
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+from sklearn.metrics import classification_report, confusion_matrix
+import seaborn as sns
+import json
+import warnings
+warnings.filterwarnings('ignore')
 
-print(f"TensorFlow Version: {tf.__version__}")
+print(f"Python: {sys.version}")
+print(f"PyTorch: {torch.__version__}")
+
+# Set device
+device = None
+try:
+    import torch_directml
+    device = torch_directml.device()
+    print(f"Using DirectML device: {device}")
+except ImportError:
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
 
 # ===================== CONFIGURATION =====================
-DATASET_PATH = "animal_sounds"          # Path to your downloaded dataset
-OUTPUT_DIR = "trained_perch_model"      # Where to save the final model
-TEST_SPLIT = 0.2                         # 20% for testing
-BATCH_SIZE = 32                           # Adjust based on your GPU memory
-EPOCHS = 50                               # Start with 50 epochs
-PERCH_INPUT_SR = 32000                    # Perch expects 32kHz audio
-PERCH_INPUT_LENGTH = 5 * PERCH_INPUT_SR   # 5 seconds of audio
+DATASET_PATH = "dataset"                    # Path to prepared dataset
+OUTPUT_DIR = "wildsound_model"               # Where to save the trained model
+BATCH_SIZE = 16                              # Reduced for stability
+EPOCHS = 50                                  # Training epochs
+LEARNING_RATE = 0.001                        # Initial learning rate
+PERCH_INPUT_SR = 32000                       # Perch expects 32kHz audio
+PERCH_INPUT_LENGTH = 5 * PERCH_INPUT_SR      # 5 seconds of audio
+NUM_WORKERS = 0                              # Set to 0 for Windows
 # ==========================================================
 
-def prepare_dataset(audio_root, output_dir, test_size=0.2):
-    """
-    Prepare the dataset by:
-    1. Organizing files by species
-    2. Resampling audio to 32kHz
-    3. Splitting into train/test sets
-    """
-    print("\n" + "="*60)
-    print("STEP 1: PREPARING DATASET FOR PERCH 2.0")
-    print("="*60)
+class AnimalSoundDataset(Dataset):
+    """Custom dataset for animal sounds compatible with Perch 2.0."""
     
-    # Create output directories
-    train_dir = os.path.join(output_dir, "train")
-    test_dir = os.path.join(output_dir, "test")
-    os.makedirs(train_dir, exist_ok=True)
-    os.makedirs(test_dir, exist_ok=True)
-    
-    # Collect all audio files and their species labels
-    species_files = {}
-    total_files = 0
-    
-    for root, dirs, files in os.walk(audio_root):
-        if "metadata.json" in files:
-            continue
-        for file in files:
-            if file.endswith(('.mp3', '.wav', '.m4a', '.3gp')):
-                # Extract species name from path
-                # Path format: .../continent/category/scientific_name/audio_file
-                path_parts = Path(root).parts
-                if len(path_parts) >= 2:
-                    species_name = path_parts[-1].replace("_", " ")
-                    file_path = os.path.join(root, file)
-                    
-                    if species_name not in species_files:
-                        species_files[species_name] = []
-                    species_files[species_name].append(file_path)
-                    total_files += 1
-    
-    print(f"Found {len(species_files)} species with {total_files} total files")
-    
-    # Process each species
-    species_list = sorted(species_files.keys())
-    successful_species = 0
-    
-    for idx, species in enumerate(species_list):
-        files = species_files[species]
+    def __init__(self, root_dir):
+        self.samples = []
+        self.labels = []
+        self.class_names = sorted([d for d in os.listdir(root_dir) 
+                                   if os.path.isdir(os.path.join(root_dir, d))])
+        self.class_to_idx = {cls_name: i for i, cls_name in enumerate(self.class_names)}
         
-        # Skip species with too few files
-        if len(files) < 2:
-            print(f"  Skipping {species}: only {len(files)} file(s)")
-            continue
+        print(f"Loading dataset from {root_dir}")
+        print(f"Found {len(self.class_names)} classes")
+        
+        # Collect all audio files
+        for class_name in self.class_names:
+            class_dir = os.path.join(root_dir, class_name)
+            if not os.path.exists(class_dir):
+                continue
+            for file in os.listdir(class_dir):
+                if file.endswith(('.wav', '.mp3', '.m4a', '.3gp')):
+                    file_path = os.path.join(class_dir, file)
+                    self.samples.append((file_path, self.class_to_idx[class_name]))
+        
+        print(f"Total samples: {len(self.samples)}")
+    
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, idx):
+        path, label = self.samples[idx]
+        
+        try:
+            # Load audio file
+            audio, sr = sf.read(path)
             
-        # Create species directories
-        species_train_dir = os.path.join(train_dir, species)
-        species_test_dir = os.path.join(test_dir, species)
-        os.makedirs(species_train_dir, exist_ok=True)
-        os.makedirs(species_test_dir, exist_ok=True)
-        
-        # Split files
-        train_files, test_files = train_test_split(
-            files, test_size=test_size, random_state=42
-        )
-        
-        # Process training files
-        for src_file in train_files:
-            dst_file = os.path.join(
-                species_train_dir, 
-                f"train_{os.path.basename(src_file).split('.')[0]}.wav"
-            )
-            try:
-                # Load and resample audio
-                audio, sr = sf.read(src_file)
-                if len(audio.shape) > 1:
-                    audio = audio.mean(axis=1)  # Convert to mono
-                
-                # Resample to 32kHz
-                if sr != PERCH_INPUT_SR:
-                    audio = resampy.resample(audio, sr, PERCH_INPUT_SR)
-                
-                # Ensure exactly 5 seconds (pad or truncate)
-                if len(audio) < PERCH_INPUT_LENGTH:
-                    audio = np.pad(audio, (0, PERCH_INPUT_LENGTH - len(audio)))
-                else:
-                    audio = audio[:PERCH_INPUT_LENGTH]
-                
-                # Save as WAV
-                sf.write(dst_file, audio, PERCH_INPUT_SR)
-                
-            except Exception as e:
-                print(f"    Error processing {src_file}: {e}")
-        
-        # Process test files (same logic)
-        for src_file in test_files:
-            dst_file = os.path.join(
-                species_test_dir, 
-                f"test_{os.path.basename(src_file).split('.')[0]}.wav"
-            )
-            try:
-                audio, sr = sf.read(src_file)
-                if len(audio.shape) > 1:
-                    audio = audio.mean(axis=1)
-                if sr != PERCH_INPUT_SR:
-                    audio = resampy.resample(audio, sr, PERCH_INPUT_SR)
-                if len(audio) < PERCH_INPUT_LENGTH:
-                    audio = np.pad(audio, (0, PERCH_INPUT_LENGTH - len(audio)))
-                else:
-                    audio = audio[:PERCH_INPUT_LENGTH]
-                sf.write(dst_file, audio, PERCH_INPUT_SR)
-            except Exception as e:
-                print(f"    Error processing {src_file}: {e}")
-        
-        successful_species += 1
-        if (idx + 1) % 50 == 0:
-            print(f"  Processed {idx + 1}/{len(species_list)} species...")
-    
-    print(f"\n✅ Dataset prepared: {successful_species} species")
-    print(f"   Train: {train_dir}")
-    print(f"   Test: {test_dir}")
-    
-    return train_dir, test_dir, successful_species
+            # Convert to mono if stereo
+            if len(audio.shape) > 1:
+                audio = audio.mean(axis=1)
+            
+            # Resample if needed (should already be resampled by prepare script)
+            if sr != PERCH_INPUT_SR:
+                audio = resampy.resample(audio, sr, PERCH_INPUT_SR)
+            
+            # Ensure exactly 5 seconds (pad or truncate)
+            if len(audio) < PERCH_INPUT_LENGTH:
+                audio = np.pad(audio, (0, PERCH_INPUT_LENGTH - len(audio)))
+            else:
+                audio = audio[:PERCH_INPUT_LENGTH]
+            
+            # Normalize audio
+            audio = audio / (np.max(np.abs(audio)) + 1e-8)
+            
+            return torch.FloatTensor(audio), label
+            
+        except Exception as e:
+            print(f"Error loading {path}: {e}")
+            # Return a fallback (silence)
+            return torch.zeros(PERCH_INPUT_LENGTH), label
 
-def build_perch_model(num_classes):
+class PerchClassifier(nn.Module):
     """
-    Build a model using Perch 2.0 embeddings + a new classification head.
+    Perch 2.0-based classifier with linear probing.
+    Uses frozen Perch embeddings and trains only the classification head.
     """
-    print("\n" + "="*60)
-    print("STEP 2: BUILDING PERCH 2.0 MODEL")
-    print("="*60)
     
-    try:
-        # Install perch_hoplite if not already installed
-        import perch_hoplite
-    except ImportError:
-        print("Installing perch_hoplite from GitHub...")
-        os.system("pip install git+https://github.com/google-research/perch-hoplite.git")
-        import perch_hoplite
-    
-    from perch_hoplite.zoo import model_configs
-    
-    print("Loading Perch 2.0 base model...")
-    # This downloads the model from Kaggle (requires Kaggle API credentials)
-    base_model = model_configs.load_model_by_name('perch_v2')
-    
-    # Perch 2.0 uses an EfficientNet-B3 backbone and outputs 1536-dim embeddings [citation:1][citation:4]
-    # We'll create a new model that uses Perch's embedding output
-    
-    # Create a Keras model that uses Perch's embedding function
-    input_layer = tf.keras.layers.Input(shape=(PERCH_INPUT_LENGTH,), name="audio_waveform")
-    
-    # Wrap the Perch embedding function in a Lambda layer
-    def perch_embedding_fn(waveform):
-        # waveform shape: (batch, 160000)
-        # Convert to list of numpy arrays for Perch's embed method
-        embeddings = tf.numpy_function(
-            lambda x: np.array([base_model.embed(w)[0] for w in x]),
-            [waveform],
-            tf.float32
-        )
-        embeddings.set_shape((None, 1536))  # Perch outputs 1536-dim embeddings [citation:1]
-        return embeddings
-    
-    embeddings = tf.keras.layers.Lambda(perch_embedding_fn)(input_layer)
-    
-    # Add a simple classification head on top of the frozen embeddings
-    x = tf.keras.layers.Dense(512, activation='relu')(embeddings)
-    x = tf.keras.layers.Dropout(0.3)(x)
-    x = tf.keras.layers.Dense(256, activation='relu')(x)
-    x = tf.keras.layers.Dropout(0.3)(x)
-    outputs = tf.keras.layers.Dense(num_classes, activation='softmax')(x)
-    
-    model = tf.keras.Model(inputs=input_layer, outputs=outputs)
-    
-    # Freeze the Perch embedding layers (only train the new classification head)
-    # The Lambda layer doesn't have trainable weights, so we're good
-    
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
-        loss='sparse_categorical_crossentropy',
-        metrics=['accuracy']
-    )
-    
-    model.summary()
-    print(f"✅ Perch 2.0 model built with {num_classes} output classes")
-    
-    return model
-
-def train_model(model, train_dir, test_dir):
-    """
-    Train the classification head using the prepared dataset.
-    """
-    print("\n" + "="*60)
-    print("STEP 3: TRAINING CLASSIFICATION HEAD")
-    print("="*60)
-    
-    # Create TensorFlow datasets
-    train_ds = tf.keras.preprocessing.image_dataset_from_directory(
-        train_dir,
-        labels='inferred',
-        label_mode='int',  # Sparse labels
-        batch_size=BATCH_SIZE,
-        shuffle=True,
-        seed=42,
-        validation_split=None
-    )
-    
-    test_ds = tf.keras.preprocessing.image_dataset_from_directory(
-        test_dir,
-        labels='inferred',
-        label_mode='int',
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        seed=42,
-        validation_split=None
-    )
-    
-    # Get class names
-    class_names = train_ds.class_names
-    print(f"Training on {len(class_names)} classes")
-    
-    # Save class names for later
-    with open(os.path.join(OUTPUT_DIR, "labels.txt"), 'w') as f:
-        for name in class_names:
-            f.write(f"{name}\n")
-    
-    # Train the model
-    print(f"\nStarting training for {EPOCHS} epochs...")
-    print(f"Estimated time on RX 6600: 2-4 hours")
-    
-    history = model.fit(
-        train_ds,
-        validation_data=test_ds,
-        epochs=EPOCHS,
-        callbacks=[
-            tf.keras.callbacks.ModelCheckpoint(
-                os.path.join(OUTPUT_DIR, 'best_model.h5'),
-                save_best_only=True,
-                monitor='val_accuracy',
-                mode='max'
-            ),
-            tf.keras.callbacks.EarlyStopping(
-                monitor='val_accuracy',
-                patience=10,
-                restore_best_weights=True
-            ),
-            tf.keras.callbacks.ReduceLROnPlateau(
-                monitor='val_loss',
-                factor=0.5,
-                patience=5,
-                min_lr=1e-6
-            )
+    def __init__(self, num_classes, device):
+        super().__init__()
+        self.device = device
+        self.num_classes = num_classes
+        
+        # Try different import paths for Perch Hoplite
+        self.base_model = None
+        
+        # List of possible import paths
+        import_paths = [
+            ("perch_hoplite.zoo", "model_configs"),
+            ("hoplite.zoo", "model_configs"),
+            ("perch.zoo", "model_configs"),
+            ("zoo", "model_configs")
         ]
-    )
+        
+        for module_path, class_name in import_paths:
+            try:
+                module = __import__(module_path, fromlist=[class_name])
+                model_configs = getattr(module, class_name)
+                print(f"Loading Perch 2.0 from {module_path}...")
+                self.base_model = model_configs.load_model_by_name('perch_v2')
+                print(f"✅ Perch 2.0 loaded successfully from {module_path}")
+                break
+            except (ImportError, AttributeError) as e:
+                continue
+        
+        if self.base_model is None:
+            print("❌ Failed to import Perch Hoplite")
+            print("\nPlease check your installation:")
+            print("  pip install git+https://github.com/google-research/perch-hoplite.git")
+            print("\nAnd verify the import:")
+            print("  python -c \"import perch_hoplite; print('✅ Installed')\"")
+            sys.exit(1)
+        
+        # Perch 2.0 outputs 1536-dim embeddings
+        self.embedding_dim = 1536
+        
+        # Simple linear classifier on top of frozen embeddings
+        self.classifier = nn.Sequential(
+            nn.Linear(self.embedding_dim, 512),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(256, num_classes)
+        ).to(device)
     
-    # Evaluate final model
-    print("\n" + "="*60)
-    print("EVALUATION RESULTS")
-    print("="*60)
-    test_loss, test_acc = model.evaluate(test_ds)
-    print(f"Test accuracy: {test_acc:.4f}")
-    print(f"Test loss: {test_loss:.4f}")
+    def get_embeddings(self, waveforms):
+        """
+        Extract Perch 2.0 embeddings from audio waveforms.
+        Handles different Perch API versions.
+        """
+        # Move to CPU for Perch (it expects numpy)
+        waveforms_np = waveforms.cpu().numpy()
+        
+        # Get embeddings for each sample in batch
+        embeddings = []
+        
+        for i in range(waveforms_np.shape[0]):
+            try:
+                # Try different Perch API patterns
+                result = self.base_model.embed(waveforms_np[i])
+                
+                # Handle different return types
+                if isinstance(result, tuple):
+                    # Returns (embeddings, logits)
+                    emb = result[0]
+                    if isinstance(emb, np.ndarray):
+                        if len(emb.shape) > 1:
+                            embeddings.append(emb[0])
+                        else:
+                            embeddings.append(emb)
+                    else:
+                        embeddings.append(emb)
+                elif hasattr(result, 'numpy'):
+                    # Returns a tensor-like object
+                    embeddings.append(result.numpy())
+                else:
+                    # Assume it's already the embedding
+                    if isinstance(result, np.ndarray):
+                        if len(result.shape) > 1:
+                            embeddings.append(result[0])
+                        else:
+                            embeddings.append(result)
+                    else:
+                        embeddings.append(np.array(result))
+                        
+            except Exception as e:
+                print(f"Error getting embedding for sample {i}: {e}")
+                # Return zero embedding as fallback
+                embeddings.append(np.zeros(self.embedding_dim))
+        
+        embeddings = np.array(embeddings, dtype=np.float32)
+        return torch.FloatTensor(embeddings).to(self.device)
     
-    return model, class_names, history
+    def forward(self, waveforms):
+        """Forward pass: waveforms -> embeddings -> logits."""
+        with torch.no_grad():  # Freeze Perch base model
+            embeddings = self.get_embeddings(waveforms)
+        
+        return self.classifier(embeddings)
 
-def convert_to_tflite(model, class_names, output_dir):
-    """
-    Convert the trained Keras model to TensorFlow Lite format.
-    """
-    print("\n" + "="*60)
-    print("STEP 4: CONVERTING TO TFLITE")
-    print("="*60)
+def train_epoch(model, dataloader, criterion, optimizer, device, epoch):
+    """Train for one epoch."""
+    model.train()
+    running_loss = 0.0
+    correct = 0
+    total = 0
     
-    # Convert the model to TFLite
-    converter = tf.lite.TFLiteConverter.from_keras_model(model)
-    converter.optimizations = [tf.lite.Optimize.DEFAULT]
-    converter.target_spec.supported_types = [tf.float16]  # Use FP16 for smaller size
+    pbar = tqdm(dataloader, desc=f'Epoch {epoch}')
+    for inputs, labels in pbar:
+        inputs, labels = inputs.to(device), labels.to(device)
+        
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+        
+        running_loss += loss.item()
+        _, predicted = torch.max(outputs, 1)
+        total += labels.size(0)
+        correct += (predicted == labels).sum().item()
+        
+        pbar.set_postfix({
+            'loss': f'{running_loss/len(pbar):.4f}',
+            'acc': f'{100.*correct/total:.2f}%'
+        })
     
-    tflite_model = converter.convert()
+    return running_loss/len(dataloader), 100.*correct/total
+
+def validate(model, dataloader, criterion, device):
+    """Validate the model."""
+    model.eval()
+    running_loss = 0.0
+    correct = 0
+    total = 0
+    all_preds = []
+    all_labels = []
     
-    # Save the TFLite model
-    tflite_path = os.path.join(output_dir, 'animal_classifier.tflite')
-    with open(tflite_path, 'wb') as f:
-        f.write(tflite_model)
+    with torch.no_grad():
+        for inputs, labels in tqdm(dataloader, desc='Validation'):
+            inputs, labels = inputs.to(device), labels.to(device)
+            
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            
+            running_loss += loss.item()
+            _, predicted = torch.max(outputs, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+            
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
     
-    # Also save the full Keras model for reference
-    model.save(os.path.join(output_dir, 'full_model.h5'))
+    return (running_loss/len(dataloader), 
+            100.*correct/total,
+            np.array(all_labels),
+            np.array(all_preds))
+
+def plot_training_history(train_losses, train_accs, val_losses, val_accs, output_dir):
+    """Plot training curves."""
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5))
     
-    print(f"✅ TFLite model saved to: {tflite_path}")
-    print(f"   Size: {os.path.getsize(tflite_path) / 1024 / 1024:.2f} MB")
+    # Loss plot
+    axes[0].plot(train_losses, label='Train Loss')
+    axes[0].plot(val_losses, label='Val Loss')
+    axes[0].set_xlabel('Epoch')
+    axes[0].set_ylabel('Loss')
+    axes[0].set_title('Training and Validation Loss')
+    axes[0].legend()
+    axes[0].grid(True)
     
-    return tflite_path
+    # Accuracy plot
+    axes[1].plot(train_accs, label='Train Acc')
+    axes[1].plot(val_accs, label='Val Acc')
+    axes[1].set_xlabel('Epoch')
+    axes[1].set_ylabel('Accuracy (%)')
+    axes[1].set_title('Training and Validation Accuracy')
+    axes[1].legend()
+    axes[1].grid(True)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'training_history.png'))
+    plt.show()
+
+def plot_confusion_matrix(labels, preds, class_names, output_dir, top_k=20):
+    """Plot confusion matrix for top-k classes."""
+    # Get unique classes that appear in this batch
+    unique_classes = np.unique(np.concatenate([labels, preds]))
+    
+    # If too many classes, show only top-k by frequency
+    if len(unique_classes) > top_k:
+        # Count occurrences
+        counts = np.bincount(labels)
+        top_indices = np.argsort(counts)[-top_k:]
+        mask = np.isin(labels, top_indices)
+        labels_subset = labels[mask]
+        preds_subset = preds[mask]
+        class_subset = [class_names[i] for i in top_indices]
+    else:
+        labels_subset = labels
+        preds_subset = preds
+        class_subset = class_names
+    
+    cm = confusion_matrix(labels_subset, preds_subset)
+    
+    plt.figure(figsize=(12, 10))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                xticklabels=class_subset,
+                yticklabels=class_subset)
+    plt.title(f'Confusion Matrix (Top {len(class_subset)} Classes)')
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'confusion_matrix.png'))
+    plt.show()
 
 def main():
-    parser = argparse.ArgumentParser(description='Train Perch 2.0 model on animal sounds')
-    parser.add_argument('--dataset', default=DATASET_PATH,
-                        help='Path to animal_sounds dataset')
-    parser.add_argument('--output', default=OUTPUT_DIR,
-                        help='Output directory for trained model')
-    parser.add_argument('--epochs', type=int, default=EPOCHS,
-                        help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=BATCH_SIZE,
-                        help='Batch size for training')
+    parser = argparse.ArgumentParser(description='Fine-tune Perch 2.0 on animal sounds')
+    parser.add_argument('--dataset', default=DATASET_PATH, help='Path to dataset')
+    parser.add_argument('--output', default=OUTPUT_DIR, help='Output directory')
+    parser.add_argument('--epochs', type=int, default=EPOCHS, help='Number of epochs')
+    parser.add_argument('--batch_size', type=int, default=BATCH_SIZE, help='Batch size')
+    parser.add_argument('--lr', type=float, default=LEARNING_RATE, help='Learning rate')
     
     args = parser.parse_args()
     
-    global DATASET_PATH, OUTPUT_DIR, EPOCHS, BATCH_SIZE
-    DATASET_PATH = args.dataset
-    OUTPUT_DIR = args.output
-    EPOCHS = args.epochs
-    BATCH_SIZE = args.batch_size
+    # Create output directory
+    os.makedirs(args.output, exist_ok=True)
     
-    print("="*60)
-    print("WILD SOUND PERCH 2.0 TRAINER")
-    print("="*60)
-    print(f"Dataset: {DATASET_PATH}")
-    print(f"Output: {OUTPUT_DIR}")
-    print(f"Epochs: {EPOCHS}")
-    print(f"Batch size: {BATCH_SIZE}")
-    print(f"Estimated time on RX 6600: {int(EPOCHS * 0.08)} minutes")
-    print("="*60)
+    print(f"\n{'='*60}")
+    print(f"Using device: {device}")
+    print(f"{'='*60}\n")
     
-    # Confirm before starting
-    response = input("\nStart training? This will take several hours. (y/n): ")
-    if response.lower() != 'y':
-        print("Exiting.")
-        return
+    # Load dataset
+    train_path = os.path.join(args.dataset, 'train')
+    test_path = os.path.join(args.dataset, 'test')
     
-    # Step 1: Prepare dataset
-    processed_dir = os.path.join(OUTPUT_DIR, "processed_audio")
-    train_dir, test_dir, num_species = prepare_dataset(
-        DATASET_PATH, processed_dir, test_size=TEST_SPLIT
+    if not os.path.exists(train_path):
+        print(f"Error: Training directory not found at {train_path}")
+        print("Please run the dataset preparation script first.")
+        sys.exit(1)
+    
+    if not os.path.exists(test_path):
+        print(f"Error: Test directory not found at {test_path}")
+        print("Please run the dataset preparation script first.")
+        sys.exit(1)
+    
+    # Create datasets
+    print("Loading training data...")
+    train_dataset = AnimalSoundDataset(train_path)
+    print("Loading test data...")
+    test_dataset = AnimalSoundDataset(test_path)
+    
+    # Create data loaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=NUM_WORKERS,
+        pin_memory=False  # Disable for DirectML
     )
     
-    if num_species == 0:
-        print("Error: No valid species found in dataset")
-        return
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=NUM_WORKERS,
+        pin_memory=False
+    )
     
-    # Step 2: Build model
-    model = build_perch_model(num_species)
+    # Save class labels for later use
+    with open(os.path.join(args.output, 'labels.txt'), 'w') as f:
+        for class_name in train_dataset.class_names:
+            f.write(f"{class_name}\n")
     
-    # Step 3: Train model
-    model, class_names, history = train_model(model, train_dir, test_dir)
+    print(f"\n{'='*60}")
+    print(f"Training on {len(train_dataset.class_names)} classes")
+    print(f"Train samples: {len(train_dataset)}")
+    print(f"Test samples: {len(test_dataset)}")
+    print(f"{'='*60}\n")
     
-    # Step 4: Convert to TFLite
-    tflite_path = convert_to_tflite(model, class_names, OUTPUT_DIR)
+    # Initialize model
+    model = PerchClassifier(len(train_dataset.class_names), device)
     
+    # Loss and optimizer
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.classifier.parameters(), lr=args.lr)
+    
+    # Training history
+    train_losses, train_accs = [], []
+    val_losses, val_accs = [], []
+    best_val_acc = 0.0
+    
+    print(f"\nStarting training for {args.epochs} epochs...")
+    print(f"Estimated time on RX 6600: ~{args.epochs * 2} minutes\n")
+    
+    for epoch in range(1, args.epochs + 1):
+        # Train
+        train_loss, train_acc = train_epoch(
+            model, train_loader, criterion, optimizer, device, epoch
+        )
+        train_losses.append(train_loss)
+        train_accs.append(train_acc)
+        
+        # Validate
+        val_loss, val_acc, _, _ = validate(model, test_loader, criterion, device)
+        val_losses.append(val_loss)
+        val_accs.append(val_acc)
+        
+        # Save best model
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            torch.save(model.state_dict(), os.path.join(args.output, 'best_model.pt'))
+            print(f"✅ Saved best model with validation accuracy: {val_acc:.2f}%")
+        
+        print(f"Epoch {epoch}: Train Loss={train_loss:.4f}, Train Acc={train_acc:.2f}%, "
+              f"Val Loss={val_loss:.4f}, Val Acc={val_acc:.2f}%\n")
+    
+    # Final evaluation
     print("\n" + "="*60)
+    print("FINAL EVALUATION")
+    print("="*60)
+    
+    # Load best model
+    best_model_path = os.path.join(args.output, 'best_model.pt')
+    if os.path.exists(best_model_path):
+        model.load_state_dict(torch.load(best_model_path, map_location=device))
+    
+    val_loss, val_acc, all_labels, all_preds = validate(model, test_loader, criterion, device)
+    
+    print(f"\nBest validation accuracy: {best_val_acc:.2f}%")
+    print(f"Final validation accuracy: {val_acc:.2f}%")
+    
+    # Classification report for top classes
+    print("\nClassification Report (Top 20 classes):")
+    unique_labels = np.unique(all_labels)
+    if len(unique_labels) > 20:
+        # Get top 20 most frequent classes
+        counts = np.bincount(all_labels)
+        top_indices = np.argsort(counts)[-20:]
+        mask = np.isin(all_labels, top_indices)
+        labels_subset = all_labels[mask]
+        preds_subset = all_preds[mask]
+        target_names = [train_dataset.class_names[i] for i in top_indices]
+    else:
+        labels_subset = all_labels
+        preds_subset = all_preds
+        target_names = train_dataset.class_names
+    
+    print(classification_report(
+        labels_subset, preds_subset,
+        target_names=target_names,
+        zero_division=0
+    ))
+    
+    # Plot training history
+    plot_training_history(train_losses, train_accs, val_losses, val_accs, args.output)
+    
+    # Plot confusion matrix
+    plot_confusion_matrix(all_labels, all_preds, train_dataset.class_names, args.output)
+    
+    # Save final model
+    torch.save(model.state_dict(), os.path.join(args.output, 'final_model.pt'))
+    
+    # Save training stats
+    stats = {
+        'best_val_acc': float(best_val_acc),
+        'final_val_acc': float(val_acc),
+        'train_losses': [float(x) for x in train_losses],
+        'train_accs': [float(x) for x in train_accs],
+        'val_losses': [float(x) for x in val_losses],
+        'val_accs': [float(x) for x in val_accs]
+    }
+    
+    with open(os.path.join(args.output, 'training_stats.json'), 'w') as f:
+        json.dump(stats, f, indent=2)
+    
+    print(f"\n{'='*60}")
     print("TRAINING COMPLETE!")
     print("="*60)
-    print(f"Model files saved to: {OUTPUT_DIR}/")
-    print("   - animal_classifier.tflite (for Android)")
-    print("   - labels.txt (class names in order)")
-    print("   - full_model.h5 (Keras model for reference)")
+    print(f"Model saved to: {args.output}/")
+    print(f"  - best_model.pt (best checkpoint)")
+    print(f"  - final_model.pt (final model)")
+    print(f"  - labels.txt (class names in order)")
+    print(f"  - training_history.png")
+    print(f"  - confusion_matrix.png")
+    print(f"  - training_stats.json")
     print("\nNext steps:")
-    print("1. Copy animal_classifier.tflite to your Android app's assets folder")
-    print("2. Copy labels.txt to your Android app's assets folder")
-    print("3. Update your Android code to use the model")
-    print("\nHappy coding! 🎉")
+    print("1. Test the model on new recordings")
+    print("2. Convert to TFLite for Android deployment")
+    print("3. Integrate into your Wild Sound app")
+    print("="*60)
 
 if __name__ == "__main__":
     main()
