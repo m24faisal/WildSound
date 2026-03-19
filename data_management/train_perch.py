@@ -2,7 +2,7 @@
 """
 Wild Sound - Perch 2.0 Fine-Tuning Script
 Trains a linear classifier on top of Perch 2.0 embeddings for 667 animal species.
-SIMPLIFIED VERSION - Better error handling and Perch verification
+FIXED VERSION - Using direct imports to satisfy Pylance
 """
 
 import os
@@ -11,12 +11,15 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
+from torch.optim.adam import Adam
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 import soundfile as sf
 import resampy
 import argparse
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, confusion_matrix
+import seaborn as sns
 import json
 import warnings
 warnings.filterwarnings('ignore')
@@ -290,6 +293,39 @@ def plot_training_history(train_losses, train_accs, val_losses, val_accs, output
     plt.savefig(os.path.join(output_dir, 'training_history.png'))
     plt.show()
 
+def plot_confusion_matrix(labels, preds, class_names, output_dir, top_k=20):
+    """Plot confusion matrix for top-k classes."""
+    # Get unique classes that appear in this batch
+    unique_classes = np.unique(np.concatenate([labels, preds]))
+    
+    # If too many classes, show only top-k by frequency
+    if len(unique_classes) > top_k:
+        # Count occurrences
+        counts = np.bincount(labels)
+        top_indices = np.argsort(counts)[-top_k:]
+        mask = np.isin(labels, top_indices)
+        labels_subset = labels[mask]
+        preds_subset = preds[mask]
+        class_subset = [class_names[i] for i in top_indices]
+    else:
+        labels_subset = labels
+        preds_subset = preds
+        class_subset = class_names
+    
+    cm = confusion_matrix(labels_subset, preds_subset)
+    
+    plt.figure(figsize=(12, 10))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                xticklabels=class_subset,
+                yticklabels=class_subset)
+    plt.title(f'Confusion Matrix (Top {len(class_subset)} Classes)')
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'confusion_matrix.png'))
+    plt.show()
+
 def main():
     parser = argparse.ArgumentParser(description='Fine-tune Perch 2.0 on animal sounds')
     parser.add_argument('--dataset', default=DATASET_PATH, help='Path to dataset')
@@ -352,9 +388,10 @@ def main():
     # Initialize model
     model = PerchClassifier(len(train_dataset.class_names), device)
     
-    # Loss and optimizer - Adam is correct, ignore IDE warning
+    # Loss and optimizer - Using direct imports to satisfy Pylance
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.classifier.parameters(), lr=args.lr)
+    optimizer = Adam(model.classifier.parameters(), lr=args.lr)  # Direct import, no red line!
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
     
     # Training history
     train_losses, train_accs = [], []
@@ -362,6 +399,7 @@ def main():
     best_val_acc = 0.0
     
     print(f"\nStarting training for {args.epochs} epochs...")
+    print(f"Estimated time on RX 6600: ~{args.epochs * 2} minutes\n")
     
     for epoch in range(1, args.epochs + 1):
         # Train
@@ -375,6 +413,9 @@ def main():
         val_loss, val_acc, _, _ = validate(model, test_loader, criterion, device)
         val_losses.append(val_loss)
         val_accs.append(val_acc)
+        
+        # Learning rate scheduling
+        scheduler.step(val_loss)
         
         # Save best model
         if val_acc > best_val_acc:
@@ -400,19 +441,64 @@ def main():
     print(f"\nBest validation accuracy: {best_val_acc:.2f}%")
     print(f"Final validation accuracy: {val_acc:.2f}%")
     
-    # Save final model
-    torch.save(model.state_dict(), os.path.join(args.output, 'final_model.pt'))
+    # Classification report for top classes
+    print("\nClassification Report (Top 20 classes):")
+    unique_labels = np.unique(all_labels)
+    if len(unique_labels) > 20:
+        # Get top 20 most frequent classes
+        counts = np.bincount(all_labels)
+        top_indices = np.argsort(counts)[-20:]
+        mask = np.isin(all_labels, top_indices)
+        labels_subset = all_labels[mask]
+        preds_subset = all_preds[mask]
+        target_names = [train_dataset.class_names[i] for i in top_indices]
+    else:
+        labels_subset = all_labels
+        preds_subset = all_preds
+        target_names = train_dataset.class_names
+    
+    print(classification_report(
+        labels_subset, preds_subset,
+        target_names=target_names,
+        zero_division=0
+    ))
     
     # Plot training history
     plot_training_history(train_losses, train_accs, val_losses, val_accs, args.output)
+    
+    # Plot confusion matrix
+    plot_confusion_matrix(all_labels, all_preds, train_dataset.class_names, args.output)
+    
+    # Save final model
+    torch.save(model.state_dict(), os.path.join(args.output, 'final_model.pt'))
+    
+    # Save training stats
+    stats = {
+        'best_val_acc': float(best_val_acc),
+        'final_val_acc': float(val_acc),
+        'train_losses': [float(x) for x in train_losses],
+        'train_accs': [float(x) for x in train_accs],
+        'val_losses': [float(x) for x in val_losses],
+        'val_accs': [float(x) for x in val_accs]
+    }
+    
+    with open(os.path.join(args.output, 'training_stats.json'), 'w') as f:
+        json.dump(stats, f, indent=2)
     
     print(f"\n{'='*60}")
     print("TRAINING COMPLETE!")
     print("="*60)
     print(f"Model saved to: {args.output}/")
-    print(f"  - best_model.pt")
-    print(f"  - final_model.pt")
-    print(f"  - labels.txt")
+    print(f"  - best_model.pt (best checkpoint)")
+    print(f"  - final_model.pt (final model)")
+    print(f"  - labels.txt (class names in order)")
+    print(f"  - training_history.png")
+    print(f"  - confusion_matrix.png")
+    print(f"  - training_stats.json")
+    print("\nNext steps:")
+    print("1. Test the model on new recordings")
+    print("2. Convert to TFLite for Android deployment")
+    print("3. Integrate into your Wild Sound app")
     print("="*60)
 
 if __name__ == "__main__":
