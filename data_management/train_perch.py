@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Wild Sound - Pre-compute embeddings then train
-Step 1: Compute Perch embeddings for all audio files
-Step 2: Train classifier on embeddings
+Wild Sound - Perch 2.0 Fine-Tuning
+Final working version - uses np.array() to convert InferenceOutputs
 """
 
 import os
@@ -17,7 +16,6 @@ import resampy
 import argparse
 from tqdm import tqdm
 import json
-import pickle
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -46,113 +44,72 @@ PERCH_INPUT_LENGTH = 5 * PERCH_INPUT_SR
 NUM_WORKERS = 0
 # ==========================================================
 
-def load_audio(path):
-    """Load and preprocess audio file for Perch"""
-    try:
-        audio, sr = sf.read(path)
-        if len(audio.shape) > 1:
-            audio = audio.mean(axis=1)
-        if sr != PERCH_INPUT_SR:
-            audio = resampy.resample(audio, sr, PERCH_INPUT_SR)
-        if len(audio) < PERCH_INPUT_LENGTH:
-            audio = np.pad(audio, (0, PERCH_INPUT_LENGTH - len(audio)))
-        else:
-            audio = audio[:PERCH_INPUT_LENGTH]
-        audio = audio / (np.max(np.abs(audio)) + 1e-8)
-        return audio.astype(np.float32)
-    except Exception as e:
-        return np.zeros(PERCH_INPUT_LENGTH, dtype=np.float32)
+class AnimalSoundDataset(Dataset):
+    def __init__(self, root_dir):
+        self.samples = []
+        self.class_names = sorted([d for d in os.listdir(root_dir) 
+                                   if os.path.isdir(os.path.join(root_dir, d))])
+        self.class_to_idx = {name: i for i, name in enumerate(self.class_names)}
+        
+        print(f"\nLoading from {root_dir}")
+        print(f"Found {len(self.class_names)} classes")
+        
+        for class_name in self.class_names:
+            class_dir = os.path.join(root_dir, class_name)
+            if os.path.isdir(class_dir):
+                for file in os.listdir(class_dir):
+                    if file.endswith(('.wav', '.mp3', '.m4a')):
+                        self.samples.append((os.path.join(class_dir, file), self.class_to_idx[class_name]))
+        
+        print(f"Total samples: {len(self.samples)}")
+    
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, idx):
+        path, label = self.samples[idx]
+        
+        try:
+            audio, sr = sf.read(path)
+            if len(audio.shape) > 1:
+                audio = audio.mean(axis=1)
+            if sr != PERCH_INPUT_SR:
+                audio = resampy.resample(audio, sr, PERCH_INPUT_SR)
+            if len(audio) < PERCH_INPUT_LENGTH:
+                audio = np.pad(audio, (0, PERCH_INPUT_LENGTH - len(audio)))
+            else:
+                audio = audio[:PERCH_INPUT_LENGTH]
+            audio = audio / (np.max(np.abs(audio)) + 1e-8)
+            return torch.FloatTensor(audio), label
+        except Exception as e:
+            return torch.zeros(PERCH_INPUT_LENGTH), label
 
 def get_embedding(waveform):
-    """Get embedding from Perch"""
-    # Convert to numpy if needed
+    """Get embedding from Perch - converts InferenceOutputs to numpy"""
+    # Convert to numpy if it's a torch tensor
     if isinstance(waveform, torch.Tensor):
         waveform = waveform.cpu().numpy()
     
     # Call Perch embed
     result = base_model.embed(waveform)
     
-    # Perch returns a tuple (embeddings, logits)
-    # Let's try to get the first element safely
-    try:
-        emb = result[0]
-    except:
-        emb = result
-    
-    # Convert to numpy array if needed
-    if hasattr(emb, 'numpy'):
-        emb = emb.numpy()
+    # KEY FIX: Convert InferenceOutputs to numpy using np.array()
+    emb = np.array(result)
     
     # Ensure 1D array
-    if hasattr(emb, 'flatten'):
+    if len(emb.shape) > 1:
         emb = emb.flatten()
-    elif isinstance(emb, (list, tuple)):
-        emb = np.array(emb).flatten()
-    else:
-        emb = np.array(emb).flatten()
     
     return emb.astype(np.float32)
 
-def compute_embeddings_for_split(split_dir, split_name, cache_file):
-    """Compute embeddings for all files in a split"""
-    if os.path.exists(cache_file):
-        print(f"Loading cached embeddings from {cache_file}")
-        with open(cache_file, 'rb') as f:
-            return pickle.load(f)
-    
-    print(f"\nComputing embeddings for {split_name} split...")
-    
-    # Get all files
-    class_names = sorted([d for d in os.listdir(split_dir) 
-                          if os.path.isdir(os.path.join(split_dir, d))])
-    class_to_idx = {name: i for i, name in enumerate(class_names)}
-    
-    samples = []
-    for class_name in class_names:
-        class_dir = os.path.join(split_dir, class_name)
-        for file in os.listdir(class_dir):
-            if file.endswith(('.wav', '.mp3', '.m4a')):
-                samples.append((os.path.join(class_dir, file), class_to_idx[class_name]))
-    
-    print(f"Found {len(samples)} samples in {len(class_names)} classes")
-    
-    # Compute embeddings
-    embeddings = []
-    labels = []
-    
-    for file_path, label in tqdm(samples, desc=f"Computing embeddings for {split_name}"):
-        audio = load_audio(file_path)
-        emb = get_embedding(audio)
-        embeddings.append(emb)
-        labels.append(label)
-    
-    embeddings = np.array(embeddings, dtype=np.float32)
-    labels = np.array(labels, dtype=np.int64)
-    
-    print(f"Embeddings shape: {embeddings.shape}")
-    
-    # Save cache
-    with open(cache_file, 'wb') as f:
-        pickle.dump((embeddings, labels, class_names), f)
-    
-    return embeddings, labels, class_names
-
-class EmbeddingDataset(Dataset):
-    def __init__(self, embeddings, labels):
-        self.embeddings = torch.FloatTensor(embeddings)
-        self.labels = torch.LongTensor(labels)
-    
-    def __len__(self):
-        return len(self.labels)
-    
-    def __getitem__(self, idx):
-        return self.embeddings[idx], self.labels[idx]
-
-class Classifier(nn.Module):
+class PerchClassifier(nn.Module):
     def __init__(self, num_classes):
         super().__init__()
+        self.num_classes = num_classes
+        self.embedding_dim = 1536
+        
         self.classifier = nn.Sequential(
-            nn.Linear(1536, 512),
+            nn.Linear(self.embedding_dim, 512),
             nn.ReLU(),
             nn.Dropout(0.3),
             nn.Linear(512, 256),
@@ -161,8 +118,22 @@ class Classifier(nn.Module):
             nn.Linear(256, num_classes)
         )
     
-    def forward(self, x):
-        return self.classifier(x)
+    def forward(self, waveforms):
+        """Get embeddings from Perch and classify"""
+        batch_size = waveforms.shape[0]
+        embeddings = []
+        
+        # Process each sample in batch
+        for i in range(batch_size):
+            wav_np = waveforms[i].cpu().numpy()
+            emb = get_embedding(wav_np)
+            embeddings.append(emb)
+        
+        # Stack into batch
+        emb_tensor = torch.FloatTensor(np.array(embeddings)).to(waveforms.device)
+        
+        # Classify
+        return self.classifier(emb_tensor)
 
 def train_epoch(model, loader, criterion, optimizer, device, epoch):
     model.train()
@@ -213,55 +184,52 @@ def main():
     parser.add_argument('--dataset', default='dataset', help='Path to dataset')
     parser.add_argument('--output', default='wildsound_model', help='Output directory')
     parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=4, help='Batch size')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
     args = parser.parse_args()
     
     os.makedirs(args.output, exist_ok=True)
     
     print(f"\n{'='*60}")
-    print(f"WILD SOUND - EMBEDDING-BASED TRAINING")
+    print(f"WILD SOUND - PERCH 2.0 TRAINING")
     print(f"Device: {device}")
     print(f"Dataset: {args.dataset}")
     print(f"Output: {args.output}")
+    print(f"Epochs: {args.epochs}")
+    print(f"Batch size: {args.batch_size}")
     print(f"{'='*60}\n")
     
-    # Compute embeddings for train and test
-    train_emb, train_labels, class_names = compute_embeddings_for_split(
-        os.path.join(args.dataset, 'train'),
-        'train',
-        os.path.join(args.output, 'train_embeddings.pkl')
-    )
+    # Load data
+    train_path = os.path.join(args.dataset, 'train')
+    test_path = os.path.join(args.dataset, 'test')
     
-    test_emb, test_labels, _ = compute_embeddings_for_split(
-        os.path.join(args.dataset, 'test'),
-        'test',
-        os.path.join(args.output, 'test_embeddings.pkl')
-    )
+    if not os.path.exists(train_path):
+        print(f"Error: Training directory not found at {train_path}")
+        sys.exit(1)
     
-    # Create datasets
-    train_dataset = EmbeddingDataset(train_emb, train_labels)
-    test_dataset = EmbeddingDataset(test_emb, test_labels)
+    print("Loading training data...")
+    train_dataset = AnimalSoundDataset(train_path)
+    print("Loading test data...")
+    test_dataset = AnimalSoundDataset(test_path)
     
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=NUM_WORKERS)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=NUM_WORKERS)
     
     # Save labels
     with open(os.path.join(args.output, 'labels.txt'), 'w') as f:
-        for name in class_names:
+        for name in train_dataset.class_names:
             f.write(f"{name}\n")
     
     print(f"\n{'='*60}")
-    print(f"Training on {len(class_names)} classes")
+    print(f"Training on {len(train_dataset.class_names)} classes")
     print(f"Train samples: {len(train_dataset)}")
     print(f"Test samples: {len(test_dataset)}")
-    print(f"Embedding dim: 1536")
     print(f"{'='*60}\n")
     
     # Model
-    model = Classifier(len(class_names)).to(device)
+    model = PerchClassifier(len(train_dataset.class_names)).to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = Adam(model.parameters(), lr=args.lr)
+    optimizer = Adam(model.classifier.parameters(), lr=args.lr)
     
     best_acc = 0.0
     
@@ -281,11 +249,6 @@ def main():
     
     # Save final model
     torch.save(model.state_dict(), os.path.join(args.output, 'final_model.pt'))
-    
-    # Save stats
-    stats = {'best_acc': float(best_acc)}
-    with open(os.path.join(args.output, 'training_stats.json'), 'w') as f:
-        json.dump(stats, f, indent=2)
     
     print(f"\n{'='*60}")
     print("TRAINING COMPLETE!")
