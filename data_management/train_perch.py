@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Wild Sound - Perch 2.0 Fine-Tuning
-Final working version with debug and proper conversion
+Wild Sound - Perch 2.0 Training
+WORKING VERSION for Python 3.10 + DirectML
 """
 
 import os
@@ -18,9 +18,6 @@ from tqdm import tqdm
 import json
 import warnings
 warnings.filterwarnings('ignore')
-
-print(f"Python: {sys.version}")
-print(f"PyTorch: {torch.__version__}")
 
 # Set device
 device = None
@@ -85,50 +82,24 @@ class AnimalSoundDataset(Dataset):
             return torch.zeros(PERCH_INPUT_LENGTH), label
 
 def get_embedding(waveform):
-    """Get embedding from Perch - convert to numpy properly"""
-    # Call Perch embed
+    """Get embedding from Perch - access via .embeddings attribute"""
     result = base_model.embed(waveform)
     
-    # DEBUG: Let's see what we're dealing with
-    if not hasattr(get_embedding, '_debug_printed'):
-        print(f"\n[DEBUG] Type of result: {type(result)}")
-        print(f"[DEBUG] Result: {result}")
-        get_embedding._debug_printed = True
+    # Access the embeddings attribute directly
+    if not hasattr(result, 'embeddings'):
+        raise AttributeError("No 'embeddings' attribute found in Perch result")
     
-    # Try different conversion methods
-    try:
-        # Method 1: Check if it's already a numpy array
-        if isinstance(result, np.ndarray):
-            emb = result
-        # Method 2: Check if it has .numpy() method (TensorFlow tensor)
-        elif hasattr(result, 'numpy'):
-            emb = result.numpy()
-        # Method 3: Try to convert to list first
-        elif hasattr(result, '__array__'):
-            emb = np.array(result)
-        # Method 4: Try to cast directly
-        else:
-            emb = np.array(result)
-    except Exception as e:
-        print(f"[ERROR] Failed to convert: {e}")
-        # Last resort: try to get the first element if it's a container
-        try:
-            emb = np.array([float(x) for x in result])
-        except:
-            emb = np.zeros(1536)
+    emb = result.embeddings
     
-    # Ensure it's a 1D array
     if emb is None:
-        emb = np.zeros(1536)
-    elif len(emb.shape) > 1:
-        emb = emb.flatten()
+        raise ValueError("Embeddings are None")
     
-    # Ensure correct size (1536)
-    if emb.shape[0] != 1536:
-        if emb.shape[0] < 1536:
-            emb = np.pad(emb, (0, 1536 - emb.shape[0]))
-        else:
-            emb = emb[:1536]
+    # emb is already a numpy array from the debug output
+    # Shape is (1, 1, 1536) - flatten to (1536,)
+    
+    # Flatten to 1D array
+    if len(emb.shape) > 1:
+        emb = emb.flatten()
     
     return emb.astype(np.float32)
 
@@ -149,20 +120,15 @@ class PerchClassifier(nn.Module):
         )
     
     def forward(self, waveforms):
-        """Get embeddings from Perch and classify"""
         batch_size = waveforms.shape[0]
         embeddings = []
         
-        # Process each sample in batch
         for i in range(batch_size):
             wav_np = waveforms[i].cpu().numpy()
             emb = get_embedding(wav_np)
             embeddings.append(emb)
         
-        # Stack into batch
         emb_tensor = torch.FloatTensor(np.array(embeddings)).to(waveforms.device)
-        
-        # Classify
         return self.classifier(emb_tensor)
 
 def train_epoch(model, loader, criterion, optimizer, device, epoch):
@@ -214,7 +180,7 @@ def main():
     parser.add_argument('--dataset', default='dataset', help='Path to dataset')
     parser.add_argument('--output', default='wildsound_model', help='Output directory')
     parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
-    parser.add_argument('--batch_size', type=int, default=4, help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=8, help='Batch size')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
     args = parser.parse_args()
     
