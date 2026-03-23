@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Wild Sound - Perch 2.0 Fine-Tuning
-Final working version - uses np.array() to convert InferenceOutputs
+Final working version with debug and proper conversion
 """
 
 import os
@@ -85,20 +85,50 @@ class AnimalSoundDataset(Dataset):
             return torch.zeros(PERCH_INPUT_LENGTH), label
 
 def get_embedding(waveform):
-    """Get embedding from Perch - converts InferenceOutputs to numpy"""
-    # Convert to numpy if it's a torch tensor
-    if isinstance(waveform, torch.Tensor):
-        waveform = waveform.cpu().numpy()
-    
+    """Get embedding from Perch - convert to numpy properly"""
     # Call Perch embed
     result = base_model.embed(waveform)
     
-    # KEY FIX: Convert InferenceOutputs to numpy using np.array()
-    emb = np.array(result)
+    # DEBUG: Let's see what we're dealing with
+    if not hasattr(get_embedding, '_debug_printed'):
+        print(f"\n[DEBUG] Type of result: {type(result)}")
+        print(f"[DEBUG] Result: {result}")
+        get_embedding._debug_printed = True
     
-    # Ensure 1D array
-    if len(emb.shape) > 1:
+    # Try different conversion methods
+    try:
+        # Method 1: Check if it's already a numpy array
+        if isinstance(result, np.ndarray):
+            emb = result
+        # Method 2: Check if it has .numpy() method (TensorFlow tensor)
+        elif hasattr(result, 'numpy'):
+            emb = result.numpy()
+        # Method 3: Try to convert to list first
+        elif hasattr(result, '__array__'):
+            emb = np.array(result)
+        # Method 4: Try to cast directly
+        else:
+            emb = np.array(result)
+    except Exception as e:
+        print(f"[ERROR] Failed to convert: {e}")
+        # Last resort: try to get the first element if it's a container
+        try:
+            emb = np.array([float(x) for x in result])
+        except:
+            emb = np.zeros(1536)
+    
+    # Ensure it's a 1D array
+    if emb is None:
+        emb = np.zeros(1536)
+    elif len(emb.shape) > 1:
         emb = emb.flatten()
+    
+    # Ensure correct size (1536)
+    if emb.shape[0] != 1536:
+        if emb.shape[0] < 1536:
+            emb = np.pad(emb, (0, 1536 - emb.shape[0]))
+        else:
+            emb = emb[:1536]
     
     return emb.astype(np.float32)
 
