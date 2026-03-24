@@ -1,260 +1,201 @@
 #!/usr/bin/env python3
 """
-Wild Sound - Perch 2.0 Training
-WORKING VERSION for Python 3.10 + DirectML
+Wild Sound - Animal Sound Identifier using YAMNet Embeddings
+Builds embeddings from training set, validates on test set
 """
 
 import os
-import sys
 import numpy as np
-import torch
-import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-from torch.optim.adam import Adam
+import tensorflow_hub as hub
 import soundfile as sf
 import resampy
-import argparse
 from tqdm import tqdm
-import json
-import warnings
-warnings.filterwarnings('ignore')
+import pickle
+import argparse
+from sklearn.metrics import classification_report, accuracy_score
 
-# Set device
-device = None
-try:
-    import torch_directml
-    device = torch_directml.device()
-    print(f"✅ Using AMD GPU: {device}")
-except ImportError:
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"✅ Using device: {device}")
+print("Loading YAMNet model...")
+model = hub.load('https://tfhub.dev/google/yamnet/1')
+print("✅ YAMNet loaded")
 
-# Load Perch model
-print("\nLoading Perch 2.0 model...")
-from perch_hoplite.zoo import model_configs
-base_model = model_configs.load_model_by_name('perch_v2')
-print("✅ Perch 2.0 loaded successfully")
+SR = 16000  # YAMNet expects 16kHz
+LENGTH = 5 * SR
 
-# ===================== CONFIGURATION =====================
-PERCH_INPUT_SR = 32000
-PERCH_INPUT_LENGTH = 5 * PERCH_INPUT_SR
-NUM_WORKERS = 0
-# ==========================================================
+def load_audio(path):
+    """Load and preprocess audio"""
+    try:
+        audio, sr = sf.read(path)
+        if len(audio.shape) > 1:
+            audio = audio.mean(axis=1)
+        if sr != SR:
+            audio = resampy.resample(audio, sr, SR)
+        if len(audio) < LENGTH:
+            audio = np.pad(audio, (0, LENGTH - len(audio)))
+        else:
+            audio = audio[:LENGTH]
+        return audio.astype(np.float32)
+    except:
+        return np.zeros(LENGTH, dtype=np.float32)
 
-class AnimalSoundDataset(Dataset):
-    def __init__(self, root_dir):
-        self.samples = []
-        self.class_names = sorted([d for d in os.listdir(root_dir) 
-                                   if os.path.isdir(os.path.join(root_dir, d))])
-        self.class_to_idx = {name: i for i, name in enumerate(self.class_names)}
-        
-        print(f"\nLoading from {root_dir}")
-        print(f"Found {len(self.class_names)} classes")
-        
-        for class_name in self.class_names:
-            class_dir = os.path.join(root_dir, class_name)
-            if os.path.isdir(class_dir):
-                for file in os.listdir(class_dir):
-                    if file.endswith(('.wav', '.mp3', '.m4a')):
-                        self.samples.append((os.path.join(class_dir, file), self.class_to_idx[class_name]))
-        
-        print(f"Total samples: {len(self.samples)}")
-    
-    def __len__(self):
-        return len(self.samples)
-    
-    def __getitem__(self, idx):
-        path, label = self.samples[idx]
-        
-        try:
-            audio, sr = sf.read(path)
-            if len(audio.shape) > 1:
-                audio = audio.mean(axis=1)
-            if sr != PERCH_INPUT_SR:
-                audio = resampy.resample(audio, sr, PERCH_INPUT_SR)
-            if len(audio) < PERCH_INPUT_LENGTH:
-                audio = np.pad(audio, (0, PERCH_INPUT_LENGTH - len(audio)))
-            else:
-                audio = audio[:PERCH_INPUT_LENGTH]
-            audio = audio / (np.max(np.abs(audio)) + 1e-8)
-            return torch.FloatTensor(audio), label
-        except Exception as e:
-            return torch.zeros(PERCH_INPUT_LENGTH), label
+def get_embedding(audio):
+    """Get YAMNet embedding"""
+    waveform = np.expand_dims(audio, axis=0)
+    scores, embeddings, spectrogram = model(waveform)
+    return embeddings.numpy()[0]
 
-def get_embedding(waveform):
-    """Get embedding from Perch - access via .embeddings attribute"""
-    result = base_model.embed(waveform)
+def build_class_embeddings(train_path):
+    """Build average embedding for each class from training set"""
     
-    # Access the embeddings attribute directly
-    if not hasattr(result, 'embeddings'):
-        raise AttributeError("No 'embeddings' attribute found in Perch result")
+    classes = sorted([d for d in os.listdir(train_path) 
+                     if os.path.isdir(os.path.join(train_path, d))])
     
-    emb = result.embeddings
+    class_embeddings = {}
+    class_samples = {}
     
-    if emb is None:
-        raise ValueError("Embeddings are None")
+    print(f"\nBuilding embeddings from {len(classes)} classes...")
     
-    # emb is already a numpy array from the debug output
-    # Shape is (1, 1, 1536) - flatten to (1536,)
-    
-    # Flatten to 1D array
-    if len(emb.shape) > 1:
-        emb = emb.flatten()
-    
-    return emb.astype(np.float32)
-
-class PerchClassifier(nn.Module):
-    def __init__(self, num_classes):
-        super().__init__()
-        self.num_classes = num_classes
-        self.embedding_dim = 1536
-        
-        self.classifier = nn.Sequential(
-            nn.Linear(self.embedding_dim, 512),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(256, num_classes)
-        )
-    
-    def forward(self, waveforms):
-        batch_size = waveforms.shape[0]
+    for class_name in tqdm(classes, desc="Processing training data"):
+        class_dir = os.path.join(train_path, class_name)
         embeddings = []
         
-        for i in range(batch_size):
-            wav_np = waveforms[i].cpu().numpy()
-            emb = get_embedding(wav_np)
-            embeddings.append(emb)
+        for file in os.listdir(class_dir):
+            if file.endswith(('.wav', '.mp3')):
+                file_path = os.path.join(class_dir, file)
+                audio = load_audio(file_path)
+                emb = get_embedding(audio)
+                embeddings.append(emb)
         
-        emb_tensor = torch.FloatTensor(np.array(embeddings)).to(waveforms.device)
-        return self.classifier(emb_tensor)
+        if embeddings:
+            class_embeddings[class_name] = np.mean(embeddings, axis=0)
+            class_samples[class_name] = len(embeddings)
+    
+    print(f"\n✅ Built embeddings for {len(class_embeddings)} classes")
+    print(f"Total training samples: {sum(class_samples.values())}")
+    
+    return class_embeddings, classes
 
-def train_epoch(model, loader, criterion, optimizer, device, epoch):
-    model.train()
-    running_loss = 0.0
-    correct = 0
-    total = 0
+def evaluate_on_test_set(test_path, class_embeddings, classes):
+    """Evaluate accuracy on test set"""
     
-    pbar = tqdm(loader, desc=f'Epoch {epoch}')
-    for inputs, labels in pbar:
-        inputs, labels = inputs.to(device), labels.to(device)
-        optimizer.zero_grad()
-        outputs = model(inputs)
-        loss = criterion(outputs, labels)
-        loss.backward()
-        optimizer.step()
-        
-        running_loss += loss.item()
-        _, pred = torch.max(outputs, 1)
-        total += labels.size(0)
-        correct += (pred == labels).sum().item()
-        
-        pbar.set_postfix({'loss': f'{running_loss/len(pbar):.4f}', 
-                         'acc': f'{100.*correct/total:.2f}%'})
+    print(f"\n{'='*60}")
+    print("EVALUATING ON TEST SET")
+    print(f"{'='*60}")
     
-    return running_loss/len(loader), 100.*correct/total
-
-def validate(model, loader, criterion, device):
-    model.eval()
-    running_loss = 0.0
-    correct = 0
-    total = 0
+    true_labels = []
+    predicted_labels = []
+    confidences = []
     
-    with torch.no_grad():
-        for inputs, labels in tqdm(loader, desc='Validation'):
-            inputs, labels = inputs.to(device), labels.to(device)
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
+    # Process each test file
+    for class_name in tqdm(classes, desc="Processing test data"):
+        class_dir = os.path.join(test_path, class_name)
+        if not os.path.exists(class_dir):
+            continue
             
-            running_loss += loss.item()
-            _, pred = torch.max(outputs, 1)
-            total += labels.size(0)
-            correct += (pred == labels).sum().item()
+        for file in os.listdir(class_dir):
+            if file.endswith(('.wav', '.mp3')):
+                file_path = os.path.join(class_dir, file)
+                audio = load_audio(file_path)
+                recording_emb = get_embedding(audio)
+                
+                # Find best match
+                best_match = None
+                best_score = -1
+                
+                for ref_class, ref_emb in class_embeddings.items():
+                    similarity = np.dot(recording_emb, ref_emb) / (np.linalg.norm(recording_emb) * np.linalg.norm(ref_emb))
+                    if similarity > best_score:
+                        best_score = similarity
+                        best_match = ref_class
+                
+                true_labels.append(class_name)
+                predicted_labels.append(best_match)
+                confidences.append(best_score)
     
-    return running_loss/len(loader), 100.*correct/total
+    # Calculate accuracy
+    accuracy = accuracy_score(true_labels, predicted_labels)
+    
+    print(f"\n{'='*60}")
+    print("RESULTS")
+    print(f"{'='*60}")
+    print(f"Overall Accuracy: {accuracy:.2%}")
+    print(f"Test samples: {len(true_labels)}")
+    print(f"\nClassification Report (top 20 classes):")
+    
+    # Show report for top classes (limit to avoid huge output)
+    unique_classes = np.unique(true_labels)
+    if len(unique_classes) > 20:
+        # Show only classes with most samples
+        from collections import Counter
+        top_classes = [c for c, _ in Counter(true_labels).most_common(20)]
+        # Filter to top classes
+        filtered_true = [t for t in true_labels if t in top_classes]
+        filtered_pred = [p for p, t in zip(predicted_labels, true_labels) if t in top_classes]
+        print(classification_report(filtered_true, filtered_pred, zero_division=0))
+    else:
+        print(classification_report(true_labels, predicted_labels, zero_division=0))
+    
+    print(f"\nAverage confidence: {np.mean(confidences):.2%}")
+    
+    return accuracy
+
+def identify_sound(audio_file, class_embeddings):
+    """Identify a single sound file"""
+    audio = load_audio(audio_file)
+    recording_emb = get_embedding(audio)
+    
+    best_match = None
+    best_score = -1
+    
+    for class_name, class_emb in class_embeddings.items():
+        similarity = np.dot(recording_emb, class_emb) / (np.linalg.norm(recording_emb) * np.linalg.norm(class_emb))
+        if similarity > best_score:
+            best_score = similarity
+            best_match = class_name
+    
+    return best_match, best_score
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', default='dataset', help='Path to dataset')
-    parser.add_argument('--output', default='wildsound_model', help='Output directory')
-    parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
-    parser.add_argument('--batch_size', type=int, default=8, help='Batch size')
-    parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
+    parser.add_argument('--build', action='store_true', help='Build class embeddings')
+    parser.add_argument('--train', default='dataset/train', help='Training data path')
+    parser.add_argument('--test', default='dataset/test', help='Test data path')
+    parser.add_argument('--output', default='class_embeddings.pkl', help='Output file')
+    parser.add_argument('--identify', type=str, help='Identify a sound file')
     args = parser.parse_args()
     
-    os.makedirs(args.output, exist_ok=True)
-    
-    print(f"\n{'='*60}")
-    print(f"WILD SOUND - PERCH 2.0 TRAINING")
-    print(f"Device: {device}")
-    print(f"Dataset: {args.dataset}")
-    print(f"Output: {args.output}")
-    print(f"Epochs: {args.epochs}")
-    print(f"Batch size: {args.batch_size}")
-    print(f"{'='*60}\n")
-    
-    # Load data
-    train_path = os.path.join(args.dataset, 'train')
-    test_path = os.path.join(args.dataset, 'test')
-    
-    if not os.path.exists(train_path):
-        print(f"Error: Training directory not found at {train_path}")
-        sys.exit(1)
-    
-    print("Loading training data...")
-    train_dataset = AnimalSoundDataset(train_path)
-    print("Loading test data...")
-    test_dataset = AnimalSoundDataset(test_path)
-    
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=NUM_WORKERS)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=NUM_WORKERS)
-    
-    # Save labels
-    with open(os.path.join(args.output, 'labels.txt'), 'w') as f:
-        for name in train_dataset.class_names:
-            f.write(f"{name}\n")
-    
-    print(f"\n{'='*60}")
-    print(f"Training on {len(train_dataset.class_names)} classes")
-    print(f"Train samples: {len(train_dataset)}")
-    print(f"Test samples: {len(test_dataset)}")
-    print(f"{'='*60}\n")
-    
-    # Model
-    model = PerchClassifier(len(train_dataset.class_names)).to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = Adam(model.classifier.parameters(), lr=args.lr)
-    
-    best_acc = 0.0
-    
-    print(f"Starting training for {args.epochs} epochs...\n")
-    
-    for epoch in range(1, args.epochs + 1):
-        train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device, epoch)
-        val_loss, val_acc = validate(model, test_loader, criterion, device)
+    if args.build:
+        # Build embeddings from training set
+        class_embeddings, classes = build_class_embeddings(args.train)
         
-        if val_acc > best_acc:
-            best_acc = val_acc
-            torch.save(model.state_dict(), os.path.join(args.output, 'best_model.pt'))
-            print(f"\n✅ Saved best model with accuracy: {val_acc:.2f}%")
+        # Save embeddings
+        with open(args.output, 'wb') as f:
+            pickle.dump((class_embeddings, classes), f)
+        print(f"✅ Saved to {args.output}")
         
-        print(f"Epoch {epoch}: Train Loss={train_loss:.4f}, Train Acc={train_acc:.2f}%, "
-              f"Val Loss={val_loss:.4f}, Val Acc={val_acc:.2f}%\n")
-    
-    # Save final model
-    torch.save(model.state_dict(), os.path.join(args.output, 'final_model.pt'))
-    
-    print(f"\n{'='*60}")
-    print("TRAINING COMPLETE!")
-    print(f"{'='*60}")
-    print(f"Best validation accuracy: {best_acc:.2f}%")
-    print(f"Model saved to: {args.output}/")
-    print(f"  - best_model.pt")
-    print(f"  - final_model.pt")
-    print(f"  - labels.txt")
-    print("="*60)
+        # Evaluate on test set
+        if os.path.exists(args.test):
+            evaluate_on_test_set(args.test, class_embeddings, classes)
+        else:
+            print(f"\n⚠️ Test set not found at {args.test}")
+        
+    elif args.identify:
+        # Load embeddings
+        if not os.path.exists(args.output):
+            print(f"Error: {args.output} not found. Run --build first.")
+            return
+        
+        with open(args.output, 'rb') as f:
+            class_embeddings, classes = pickle.load(f)
+        
+        # Identify the sound
+        match, confidence = identify_sound(args.identify, class_embeddings)
+        print(f"\n🎵 Identified: {match}")
+        print(f"Confidence: {confidence:.2%}")
+        
+    else:
+        print("Usage:")
+        print("  python identify.py --build               # Build embeddings and evaluate")
+        print("  python identify.py --identify sound.wav  # Identify a sound file")
 
 if __name__ == "__main__":
     main()
