@@ -4,7 +4,7 @@ Rebuild animal sounds dataset with:
 - Top 20 most common wild animals per continent (with audio)
 - Top 10 most common domestic animals per continent (with audio)
 - Only downloads uncorrupted audio files
-- Safe API handling with retries and rate limiting
+- Shows download progress
 """
 
 import os
@@ -37,7 +37,7 @@ CONTINENTS = {
     "oceania": 97393
 }
 
-# Domestic animals to check (expanded list)
+# Domestic animals to check
 DOMESTIC_TAXA = [
     "Canis lupus familiaris",  # Dog
     "Felis catus",            # Cat
@@ -61,7 +61,6 @@ DOMESTIC_TAXA = [
     "Bubalus bubalis",       # Water buffalo
 ]
 
-# Create a session with retry strategy
 def create_session():
     """Create requests session with retry strategy"""
     session = requests.Session()
@@ -82,12 +81,10 @@ def make_api_request(url, params=None, max_attempts=MAX_RETRIES):
     """Make API request with exponential backoff"""
     for attempt in range(max_attempts):
         try:
-            # Add delay before request to respect rate limits
             if attempt == 0:
                 time.sleep(RATE_LIMIT_DELAY)
             else:
                 wait_time = (2 ** attempt) * 2
-                print(f"    Retry {attempt}/{max_attempts} - waiting {wait_time}s")
                 time.sleep(wait_time)
             
             response = session.get(url, params=params, timeout=TIMEOUT)
@@ -95,23 +92,17 @@ def make_api_request(url, params=None, max_attempts=MAX_RETRIES):
             return response.json()
             
         except requests.exceptions.Timeout:
-            print(f"    Timeout (attempt {attempt + 1}/{max_attempts})")
             if attempt == max_attempts - 1:
                 return None
-                
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 429:
                 retry_after = int(e.response.headers.get('Retry-After', 30))
-                print(f"    Rate limited - waiting {retry_after}s")
                 time.sleep(retry_after)
             else:
-                print(f"    HTTP error: {e}")
                 if attempt == max_attempts - 1:
                     return None
             time.sleep(RATE_LIMIT_DELAY * (attempt + 1))
-            
         except Exception as e:
-            print(f"    Request failed: {e}")
             if attempt == max_attempts - 1:
                 return None
             time.sleep(RATE_LIMIT_DELAY * (attempt + 1))
@@ -132,11 +123,9 @@ def get_top_wild_species(place_id, limit=20):
         "order": "desc"
     }
     
-    print(f"    Requesting top {limit} species...")
     data = make_api_request(url, params)
     
     if not data or 'results' not in data:
-        print(f"    ⚠️ No data returned")
         return []
     
     species_list = []
@@ -157,8 +146,6 @@ def get_top_domestic_species(place_id, limit=10):
     domestic_counts = []
     
     for idx, taxon_name in enumerate(DOMESTIC_TAXA):
-        print(f"    Checking {idx+1}/{len(DOMESTIC_TAXA)}: {taxon_name.split()[-1]}...", end="")
-        
         url = "https://api.inaturalist.org/v1/observations"
         params = {
             "taxon_name": taxon_name,
@@ -179,111 +166,108 @@ def get_top_domestic_species(place_id, limit=10):
                 'common_name': common_name,
                 'observation_count': count
             })
-            print(f" ✅ {count} recordings")
-        else:
-            print(f" ❌ none")
     
-    # Sort by count and return top N
     domestic_counts.sort(key=lambda x: x['observation_count'], reverse=True)
     return domestic_counts[:limit]
 
-def download_species_audio(species_name, output_path, max_recordings=10):
-    """Download audio for a species and verify it's not corrupted"""
+def get_audio_urls_for_species(species_name, max_recordings=10):
+    """Get audio URLs for a species (returns list of URLs)"""
     
-    successful = 0
-    attempted = 0
+    from pyinaturalist import get_observations
+    
+    urls = []
     
     try:
-        observations = get_observations_safe(
+        time.sleep(RATE_LIMIT_DELAY)
+        observations = get_observations(
             taxon_name=species_name,
             has_sounds=True,
             quality_grade="research",
             per_page=max_recordings
         )
         
-        if not observations:
-            return 0, 0
+        if not observations or not observations.get('results'):
+            return urls
         
-        for obs in observations:
+        for obs in observations.get('results', []):
             if 'sounds' not in obs or not obs['sounds']:
                 continue
             
             for sound in obs['sounds']:
-                if 'file_url' not in sound:
-                    continue
-                    
-                url = sound['file_url']
-                ext = url.split('.')[-1].split('?')[0]
-                if ext not in ['wav', 'mp3', 'm4a']:
-                    ext = 'mp3'
-                
-                filename = f"{species_name.replace(' ', '_')}_{successful+1}.{ext}"
-                filepath = output_path / filename
-                
-                # Download with retry
-                for dl_attempt in range(3):
-                    try:
-                        time.sleep(DOWNLOAD_DELAY)
-                        r = session.get(url, timeout=TIMEOUT)
-                        if r.status_code == 200:
-                            with open(filepath, 'wb') as f:
-                                f.write(r.content)
-                            attempted += 1
-                            
-                            # Verify the file is not corrupted
-                            if is_audio_valid(filepath):
-                                successful += 1
-                                print(f"    ✅ Downloaded ({successful}/{max_recordings})")
-                            else:
-                                filepath.unlink()
-                                print(f"    ⚠️ Corrupted - deleted")
-                            
-                            break
-                        else:
-                            print(f"    ⚠️ HTTP {r.status_code} - retry {dl_attempt+1}")
-                            time.sleep(2)
-                            
-                    except Exception as e:
-                        print(f"    ❌ Error: {e} - retry {dl_attempt+1}")
-                        time.sleep(2)
-                
-                if successful >= max_recordings:
-                    break
-            
-            if successful >= max_recordings:
-                break
+                if 'file_url' in sound:
+                    urls.append(sound['file_url'])
+                    if len(urls) >= max_recordings:
+                        return urls
         
-        return successful, attempted
-    
+        return urls
+        
     except Exception as e:
-        print(f"    ❌ Fatal error: {e}")
-        return 0, 0
+        print(f"      Error getting URLs: {e}")
+        return urls
 
-def get_observations_safe(**params):
-    """Safe wrapper for get_observations with retry"""
-    from pyinaturalist import get_observations
+def download_audio_file(url, output_path, retries=3):
+    """Download a single audio file with verification"""
     
-    for attempt in range(MAX_RETRIES):
+    for attempt in range(retries):
         try:
-            time.sleep(RATE_LIMIT_DELAY)
-            result = get_observations(**params)
-            if result and result.get('results'):
-                return result.get('results', [])
-            return []
-        except Exception as e:
-            print(f"    Observation fetch failed (attempt {attempt+1}): {e}")
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(3 ** attempt)
+            time.sleep(DOWNLOAD_DELAY)
+            response = session.get(url, timeout=TIMEOUT)
+            
+            if response.status_code == 200:
+                with open(output_path, 'wb') as f:
+                    f.write(response.content)
+                
+                # Verify file is not corrupted
+                if is_audio_valid(output_path):
+                    return True
+                else:
+                    output_path.unlink()
+                    return False
             else:
-                return []
+                if attempt < retries - 1:
+                    time.sleep(2)
+                    
+        except Exception as e:
+            if attempt < retries - 1:
+                time.sleep(2)
+    
+    return False
+
+def download_species_audio(species_name, output_path, max_recordings=10):
+    """Download audio for a species with progress bar"""
+    
+    # Get audio URLs
+    urls = get_audio_urls_for_species(species_name, max_recordings)
+    
+    if not urls:
+        return 0, 0
+    
+    successful = 0
+    
+    # Download each URL with progress
+    for i, url in enumerate(urls):
+        ext = url.split('.')[-1].split('?')[0]
+        if ext not in ['wav', 'mp3', 'm4a']:
+            ext = 'mp3'
+        
+        filename = f"{species_name.replace(' ', '_')}_{i+1}.{ext}"
+        filepath = output_path / filename
+        
+        print(f"      Downloading {i+1}/{len(urls)}: {filename[:50]}...", end="")
+        
+        if download_audio_file(url, filepath):
+            successful += 1
+            print(f" ✅")
+        else:
+            print(f" ❌")
+    
+    return successful, len(urls)
 
 def is_audio_valid(filepath):
     """Check if audio file is valid and not corrupted"""
     try:
         audio, sr = sf.read(filepath)
-        if len(audio) > 0:
-            return True
-        return False
+        return len(audio) > 0
     except Exception:
         return False
 
@@ -295,9 +279,8 @@ def rebuild_dataset(output_dir=OUTPUT_DIR, max_per_species=10):
     print("=" * 60)
     print(f"Output: {output_dir}")
     print(f"Max recordings per species: {max_per_species}")
-    print(f"Rate limit delay: {RATE_LIMIT_DELAY}s")
+    print(f"API delay: {RATE_LIMIT_DELAY}s")
     print(f"Download delay: {DOWNLOAD_DELAY}s")
-    print(f"Max retries: {MAX_RETRIES}")
     print("=" * 60)
     
     base_path = Path(output_dir)
@@ -320,7 +303,7 @@ def rebuild_dataset(output_dir=OUTPUT_DIR, max_per_species=10):
         continent_path.mkdir(exist_ok=True)
         
         # Get top 20 wild species
-        print(f"\n📊 Finding top 20 wild species...")
+        print(f"\n📊 Getting top 20 wild species...")
         wild_species = get_top_wild_species(place_id, limit=20)
         print(f"  Found {len(wild_species)} species with audio")
         
@@ -329,13 +312,14 @@ def rebuild_dataset(output_dir=OUTPUT_DIR, max_per_species=10):
         wild_path.mkdir(exist_ok=True)
         
         wild_stats = []
-        for species in tqdm(wild_species, desc="Downloading wild species"):
+        for species in wild_species:
             species_name = species['name']
             species_path = wild_path / species_name.replace(" ", "_")
             species_path.mkdir(exist_ok=True)
             
             print(f"\n  🎵 {species['common_name']} ({species_name})")
             print(f"     Observations: {species['observation_count']}")
+            print(f"     Downloading up to {max_per_species} recordings...")
             
             valid, attempted = download_species_audio(species_name, species_path, max_per_species)
             
@@ -351,9 +335,12 @@ def rebuild_dataset(output_dir=OUTPUT_DIR, max_per_species=10):
             
             if valid > 0:
                 dataset_stats["total_species"] += 1
+                print(f"     ✅ Downloaded {valid}/{attempted} valid files")
+            else:
+                print(f"     ❌ No valid files downloaded")
         
         # Get top 10 domestic species
-        print(f"\n📊 Finding top 10 domestic species...")
+        print(f"\n📊 Getting top 10 domestic species...")
         domestic_species = get_top_domestic_species(place_id, limit=10)
         print(f"  Found {len(domestic_species)} species with audio")
         
@@ -362,13 +349,14 @@ def rebuild_dataset(output_dir=OUTPUT_DIR, max_per_species=10):
         domestic_path.mkdir(exist_ok=True)
         
         domestic_stats = []
-        for species in tqdm(domestic_species, desc="Downloading domestic species"):
+        for species in domestic_species:
             species_name = species['name']
             species_path = domestic_path / species_name.replace(" ", "_")
             species_path.mkdir(exist_ok=True)
             
             print(f"\n  🎵 {species['common_name']} ({species_name})")
             print(f"     Observations: {species['observation_count']}")
+            print(f"     Downloading up to {max_per_species} recordings...")
             
             valid, attempted = download_species_audio(species_name, species_path, max_per_species)
             
@@ -384,6 +372,9 @@ def rebuild_dataset(output_dir=OUTPUT_DIR, max_per_species=10):
             
             if valid > 0:
                 dataset_stats["total_species"] += 1
+                print(f"     ✅ Downloaded {valid}/{attempted} valid files")
+            else:
+                print(f"     ❌ No valid files downloaded")
         
         # Save continent stats
         dataset_stats["continents"][continent_name] = {
@@ -395,15 +386,8 @@ def rebuild_dataset(output_dir=OUTPUT_DIR, max_per_species=10):
         print(f"\n📊 {continent_name.upper()} SUMMARY:")
         wild_valid = sum(s['valid_files'] for s in wild_stats)
         domestic_valid = sum(s['valid_files'] for s in domestic_stats)
-        print(f"  Wild species: {len(wild_stats)} | Valid files: {wild_valid}")
-        print(f"  Domestic species: {len(domestic_stats)} | Valid files: {domestic_valid}")
-        
-        # Save continent progress
-        with open(continent_path / "progress.json", 'w') as f:
-            json.dump({
-                "wild": wild_stats,
-                "domestic": domestic_stats
-            }, f, indent=2)
+        print(f"  Wild: {len(wild_stats)} species, {wild_valid} valid files")
+        print(f"  Domestic: {len(domestic_stats)} species, {domestic_valid} valid files")
     
     # Save overall metadata
     metadata = {
@@ -432,7 +416,7 @@ def rebuild_dataset(output_dir=OUTPUT_DIR, max_per_species=10):
     print("=" * 60)
 
 def main():
-    parser = argparse.ArgumentParser(description='Rebuild top animal sounds dataset (safe version)')
+    parser = argparse.ArgumentParser(description='Rebuild top animal sounds dataset')
     parser.add_argument('--output', default='animal_sounds', help='Output directory')
     parser.add_argument('--max', type=int, default=10, help='Max recordings per species')
     parser.add_argument('--delay', type=float, default=1.5, help='API delay in seconds')
