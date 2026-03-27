@@ -1,33 +1,28 @@
-# rebuild_top_animals_safe.py
+# download_top_wild_and_domestic.py
 """
-Rebuild animal sounds dataset with:
-- Top 20 most common wild animals per continent (with audio)
-- Top 10 most common domestic animals per continent (with audio)
-- Only downloads uncorrupted audio files
-- Shows download progress
+Get top 20 wild + top 10 domestic species per continent
+- Step 1: Get species lists from iNaturalist
+- Step 2: Download verified audio from AnimalSpeak
 """
 
 import os
-import time
 import requests
+import random
 import soundfile as sf
+from datasets import load_dataset
 from pathlib import Path
 from tqdm import tqdm
-import argparse
 import json
-import random
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+import time
+import argparse
 
 # Configuration
-RATE_LIMIT_DELAY = 1.5  # seconds between API calls (safe)
-DOWNLOAD_DELAY = 0.8    # seconds between downloads
-MAX_RETRIES = 5
-TIMEOUT = 45
-MAX_RECORDINGS_PER_SPECIES = 10
+DOWNLOAD_DELAY = 0.5
+TEST_SPLIT = 0.2
+MAX_FILES_PER_SPECIES = 10
 OUTPUT_DIR = "animal_sounds"
 
-# Continents with their iNaturalist place IDs
+# Continents with iNaturalist place IDs
 CONTINENTS = {
     "north_america": 97394,
     "south_america": 97389,
@@ -37,7 +32,7 @@ CONTINENTS = {
     "oceania": 97393
 }
 
-# Domestic animals to check
+# Domestic animals to search for (will get top 10 per continent)
 DOMESTIC_TAXA = [
     "Canis lupus familiaris",  # Dog
     "Felis catus",            # Cat
@@ -61,56 +56,8 @@ DOMESTIC_TAXA = [
     "Bubalus bubalis",       # Water buffalo
 ]
 
-def create_session():
-    """Create requests session with retry strategy"""
-    session = requests.Session()
-    retry_strategy = Retry(
-        total=MAX_RETRIES,
-        backoff_factor=2,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET"]
-    )
-    adapter = HTTPAdapter(max_retries=retry_strategy)
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    return session
-
-session = create_session()
-
-def make_api_request(url, params=None, max_attempts=MAX_RETRIES):
-    """Make API request with exponential backoff"""
-    for attempt in range(max_attempts):
-        try:
-            if attempt == 0:
-                time.sleep(RATE_LIMIT_DELAY)
-            else:
-                wait_time = (2 ** attempt) * 2
-                time.sleep(wait_time)
-            
-            response = session.get(url, params=params, timeout=TIMEOUT)
-            response.raise_for_status()
-            return response.json()
-            
-        except requests.exceptions.Timeout:
-            if attempt == max_attempts - 1:
-                return None
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 429:
-                retry_after = int(e.response.headers.get('Retry-After', 30))
-                time.sleep(retry_after)
-            else:
-                if attempt == max_attempts - 1:
-                    return None
-            time.sleep(RATE_LIMIT_DELAY * (attempt + 1))
-        except Exception as e:
-            if attempt == max_attempts - 1:
-                return None
-            time.sleep(RATE_LIMIT_DELAY * (attempt + 1))
-    
-    return None
-
 def get_top_wild_species(place_id, limit=20):
-    """Get top N most observed wild species with audio in a continent"""
+    """Get top N wild species with audio from iNaturalist"""
     
     url = "https://api.inaturalist.org/v1/observations/species_counts"
     params = {
@@ -123,29 +70,33 @@ def get_top_wild_species(place_id, limit=20):
         "order": "desc"
     }
     
-    data = make_api_request(url, params)
-    
-    if not data or 'results' not in data:
+    try:
+        response = requests.get(url, params=params, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        
+        species_list = []
+        for result in data.get('results', []):
+            taxon = result.get('taxon', {})
+            species_list.append({
+                'name': taxon.get('name'),
+                'common_name': taxon.get('preferred_common_name', taxon.get('name')),
+                'observation_count': result.get('count', 0),
+                'type': 'wild'
+            })
+        
+        return species_list
+        
+    except Exception as e:
+        print(f"  Error getting wild species: {e}")
         return []
-    
-    species_list = []
-    for result in data.get('results', []):
-        taxon = result.get('taxon', {})
-        species_list.append({
-            'id': taxon.get('id'),
-            'name': taxon.get('name'),
-            'common_name': taxon.get('preferred_common_name', taxon.get('name')),
-            'observation_count': result.get('count', 0)
-        })
-    
-    return species_list
 
 def get_top_domestic_species(place_id, limit=10):
-    """Get top N most observed domestic species with audio in a continent"""
+    """Get top N domestic species with audio for a continent"""
     
     domestic_counts = []
     
-    for idx, taxon_name in enumerate(DOMESTIC_TAXA):
+    for taxon_name in DOMESTIC_TAXA:
         url = "https://api.inaturalist.org/v1/observations"
         params = {
             "taxon_name": taxon_name,
@@ -156,276 +107,253 @@ def get_top_domestic_species(place_id, limit=10):
             "per_page": 1
         }
         
-        data = make_api_request(url, params)
-        count = data.get('total_results', 0) if data else 0
-        
-        if count > 0:
-            common_name = taxon_name.replace("_", " ").replace("domesticus", "domestic").title()
-            domestic_counts.append({
-                'name': taxon_name,
-                'common_name': common_name,
-                'observation_count': count
-            })
+        try:
+            response = requests.get(url, params=params, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            count = data.get('total_results', 0)
+            
+            if count > 0:
+                common_name = taxon_name.replace("_", " ").replace("domesticus", "domestic").title()
+                domestic_counts.append({
+                    'name': taxon_name,
+                    'common_name': common_name,
+                    'observation_count': count,
+                    'type': 'domestic'
+                })
+            
+            time.sleep(0.5)  # Rate limit
+        except:
+            pass
     
+    # Sort by count and return top N
     domestic_counts.sort(key=lambda x: x['observation_count'], reverse=True)
     return domestic_counts[:limit]
 
-def get_audio_urls_for_species(species_name, max_recordings=10):
-    """Get audio URLs for a species (returns list of URLs)"""
-    
-    from pyinaturalist import get_observations
-    
-    urls = []
-    
-    try:
-        time.sleep(RATE_LIMIT_DELAY)
-        observations = get_observations(
-            taxon_name=species_name,
-            has_sounds=True,
-            quality_grade="research",
-            per_page=max_recordings
-        )
-        
-        if not observations or not observations.get('results'):
-            return urls
-        
-        for obs in observations.get('results', []):
-            if 'sounds' not in obs or not obs['sounds']:
-                continue
-            
-            for sound in obs['sounds']:
-                if 'file_url' in sound:
-                    urls.append(sound['file_url'])
-                    if len(urls) >= max_recordings:
-                        return urls
-        
-        return urls
-        
-    except Exception as e:
-        print(f"      Error getting URLs: {e}")
-        return urls
-
-def download_audio_file(url, output_path, retries=3):
-    """Download a single audio file with verification"""
-    
-    for attempt in range(retries):
-        try:
-            time.sleep(DOWNLOAD_DELAY)
-            response = session.get(url, timeout=TIMEOUT)
-            
-            if response.status_code == 200:
-                with open(output_path, 'wb') as f:
-                    f.write(response.content)
-                
-                # Verify file is not corrupted
-                if is_audio_valid(output_path):
-                    return True
-                else:
-                    output_path.unlink()
-                    return False
-            else:
-                if attempt < retries - 1:
-                    time.sleep(2)
-                    
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(2)
-    
-    return False
-
-def download_species_audio(species_name, output_path, max_recordings=10):
-    """Download audio for a species with progress bar"""
-    
-    # Get audio URLs
-    urls = get_audio_urls_for_species(species_name, max_recordings)
-    
-    if not urls:
-        return 0, 0
-    
-    successful = 0
-    
-    # Download each URL with progress
-    for i, url in enumerate(urls):
-        ext = url.split('.')[-1].split('?')[0]
-        if ext not in ['wav', 'mp3', 'm4a']:
-            ext = 'mp3'
-        
-        filename = f"{species_name.replace(' ', '_')}_{i+1}.{ext}"
-        filepath = output_path / filename
-        
-        print(f"      Downloading {i+1}/{len(urls)}: {filename[:50]}...", end="")
-        
-        if download_audio_file(url, filepath):
-            successful += 1
-            print(f" ✅")
-        else:
-            print(f" ❌")
-    
-    return successful, len(urls)
-
-def is_audio_valid(filepath):
-    """Check if audio file is valid and not corrupted"""
+def is_valid_audio(filepath):
+    """Check if audio file is valid"""
     try:
         audio, sr = sf.read(filepath)
         return len(audio) > 0
-    except Exception:
+    except:
         return False
 
-def rebuild_dataset(output_dir=OUTPUT_DIR, max_per_species=10):
-    """Rebuild dataset with top species only"""
+def download_species_from_animalspeak(species_name, output_dir, category, max_files=10):
+    """Download a species from AnimalSpeak dataset"""
+    
+    try:
+        # Load dataset in streaming mode
+        dataset = load_dataset(
+            "davidrrobinson/AnimalSpeak",
+            split="train",
+            streaming=True
+        )
+        
+        # Collect URLs for this species
+        urls = []
+        for item in dataset:
+            if item.get('species_scientific') == species_name:
+                urls.append(item.get('url'))
+                if len(urls) >= max_files:
+                    break
+        
+        if not urls:
+            return 0, 0
+        
+        # Shuffle and split
+        random.shuffle(urls)
+        split_idx = int(len(urls) * (1 - TEST_SPLIT))
+        train_urls = urls[:split_idx]
+        test_urls = urls[split_idx:]
+        
+        # Create directories
+        safe_name = species_name.replace(" ", "_")
+        train_dir = output_dir / "train" / safe_name
+        test_dir = output_dir / "test" / safe_name
+        train_dir.mkdir(parents=True, exist_ok=True)
+        test_dir.mkdir(parents=True, exist_ok=True)
+        
+        downloaded = 0
+        
+        # Download training files
+        for i, url in enumerate(train_urls):
+            ext = url.split('.')[-1].split('?')[0]
+            if ext not in ['wav', 'mp3', 'm4a']:
+                ext = 'mp3'
+            
+            filepath = train_dir / f"{safe_name}_{i+1}.{ext}"
+            
+            try:
+                time.sleep(DOWNLOAD_DELAY)
+                r = requests.get(url, timeout=30)
+                if r.status_code == 200:
+                    with open(filepath, 'wb') as f:
+                        f.write(r.content)
+                    if is_valid_audio(filepath):
+                        downloaded += 1
+                    else:
+                        filepath.unlink()
+            except:
+                pass
+        
+        # Download test files
+        for i, url in enumerate(test_urls):
+            ext = url.split('.')[-1].split('?')[0]
+            if ext not in ['wav', 'mp3', 'm4a']:
+                ext = 'mp3'
+            
+            filepath = test_dir / f"{safe_name}_{i+1}.{ext}"
+            
+            try:
+                time.sleep(DOWNLOAD_DELAY)
+                r = requests.get(url, timeout=30)
+                if r.status_code == 200:
+                    with open(filepath, 'wb') as f:
+                        f.write(r.content)
+                    if is_valid_audio(filepath):
+                        downloaded += 1
+                    else:
+                        filepath.unlink()
+            except:
+                pass
+        
+        return downloaded, len(urls)
+        
+    except Exception as e:
+        print(f"    Error: {e}")
+        return 0, 0
+
+def build_dataset(output_dir=OUTPUT_DIR, max_per_species=10):
+    """Build dataset with top 20 wild + top 10 domestic per continent"""
     
     print("=" * 60)
-    print("REBUILDING TOP ANIMAL SOUNDS DATASET")
+    print("BUILDING TOP SPECIES DATASET")
     print("=" * 60)
     print(f"Output: {output_dir}")
-    print(f"Max recordings per species: {max_per_species}")
-    print(f"API delay: {RATE_LIMIT_DELAY}s")
-    print(f"Download delay: {DOWNLOAD_DELAY}s")
+    print(f"Max files per species: {max_per_species}")
+    print(f"Test split: {TEST_SPLIT:.0%}")
     print("=" * 60)
     
     base_path = Path(output_dir)
     base_path.mkdir(parents=True, exist_ok=True)
     
-    dataset_stats = {
-        "continents": {},
-        "total_species": 0,
-        "total_valid_files": 0,
-        "total_attempted": 0
-    }
+    all_species = {}  # name -> {common, type, continents}
+    continent_data = {}
     
-    # Process each continent
+    # Step 1: Get species for each continent
     for continent_name, place_id in CONTINENTS.items():
         print(f"\n{'='*60}")
-        print(f"PROCESSING {continent_name.upper()}")
+        print(f"CONTINENT: {continent_name.upper()}")
         print(f"{'='*60}")
         
-        continent_path = base_path / continent_name
-        continent_path.mkdir(exist_ok=True)
-        
-        # Get top 20 wild species
-        print(f"\n📊 Getting top 20 wild species...")
+        # Get wild species
+        print(f"\n🌿 Getting top 20 WILD species...")
         wild_species = get_top_wild_species(place_id, limit=20)
-        print(f"  Found {len(wild_species)} species with audio")
+        print(f"  Found {len(wild_species)} wild species")
         
-        # Download wild species
-        wild_path = continent_path / "wild"
-        wild_path.mkdir(exist_ok=True)
-        
-        wild_stats = []
-        for species in wild_species:
-            species_name = species['name']
-            species_path = wild_path / species_name.replace(" ", "_")
-            species_path.mkdir(exist_ok=True)
-            
-            print(f"\n  🎵 {species['common_name']} ({species_name})")
-            print(f"     Observations: {species['observation_count']}")
-            print(f"     Downloading up to {max_per_species} recordings...")
-            
-            valid, attempted = download_species_audio(species_name, species_path, max_per_species)
-            
-            wild_stats.append({
-                'name': species_name,
-                'common_name': species['common_name'],
-                'valid_files': valid,
-                'attempted': attempted
-            })
-            
-            dataset_stats["total_valid_files"] += valid
-            dataset_stats["total_attempted"] += attempted
-            
-            if valid > 0:
-                dataset_stats["total_species"] += 1
-                print(f"     ✅ Downloaded {valid}/{attempted} valid files")
-            else:
-                print(f"     ❌ No valid files downloaded")
-        
-        # Get top 10 domestic species
-        print(f"\n📊 Getting top 10 domestic species...")
+        # Get domestic species
+        print(f"\n🏠 Getting top 10 DOMESTIC species...")
         domestic_species = get_top_domestic_species(place_id, limit=10)
-        print(f"  Found {len(domestic_species)} species with audio")
+        print(f"  Found {len(domestic_species)} domestic species")
         
-        # Download domestic species
-        domestic_path = continent_path / "domestic"
-        domestic_path.mkdir(exist_ok=True)
+        # Combine
+        all_continent_species = wild_species + domestic_species
         
-        domestic_stats = []
-        for species in domestic_species:
-            species_name = species['name']
-            species_path = domestic_path / species_name.replace(" ", "_")
-            species_path.mkdir(exist_ok=True)
-            
-            print(f"\n  🎵 {species['common_name']} ({species_name})")
-            print(f"     Observations: {species['observation_count']}")
-            print(f"     Downloading up to {max_per_species} recordings...")
-            
-            valid, attempted = download_species_audio(species_name, species_path, max_per_species)
-            
-            domestic_stats.append({
-                'name': species_name,
-                'common_name': species['common_name'],
-                'valid_files': valid,
-                'attempted': attempted
-            })
-            
-            dataset_stats["total_valid_files"] += valid
-            dataset_stats["total_attempted"] += attempted
-            
-            if valid > 0:
-                dataset_stats["total_species"] += 1
-                print(f"     ✅ Downloaded {valid}/{attempted} valid files")
-            else:
-                print(f"     ❌ No valid files downloaded")
-        
-        # Save continent stats
-        dataset_stats["continents"][continent_name] = {
-            "wild": wild_stats,
-            "domestic": domestic_stats
+        continent_data[continent_name] = {
+            'wild': wild_species,
+            'domestic': domestic_species,
+            'downloaded': []
         }
         
-        # Summary for this continent
+        # Add to master list
+        for s in all_continent_species:
+            if s['name'] not in all_species:
+                all_species[s['name']] = {
+                    'common_name': s['common_name'],
+                    'type': s['type'],
+                    'continents': [continent_name]
+                }
+            else:
+                all_species[s['name']]['continents'].append(continent_name)
+        
+        # Show summary
         print(f"\n📊 {continent_name.upper()} SUMMARY:")
-        wild_valid = sum(s['valid_files'] for s in wild_stats)
-        domestic_valid = sum(s['valid_files'] for s in domestic_stats)
-        print(f"  Wild: {len(wild_stats)} species, {wild_valid} valid files")
-        print(f"  Domestic: {len(domestic_stats)} species, {domestic_valid} valid files")
+        print(f"  Wild: {len(wild_species)} species")
+        print(f"  Domestic: {len(domestic_species)} species")
+        if wild_species:
+            print(f"  Top wild: {wild_species[0]['common_name']} ({wild_species[0]['observation_count']} obs)")
+        if domestic_species:
+            print(f"  Top domestic: {domestic_species[0]['common_name']} ({domestic_species[0]['observation_count']} obs)")
     
-    # Save overall metadata
+    print(f"\n{'='*60}")
+    print(f"TOTAL UNIQUE SPECIES: {len(all_species)}")
+    print(f"  Wild: {sum(1 for s in all_species.values() if s['type'] == 'wild')}")
+    print(f"  Domestic: {sum(1 for s in all_species.values() if s['type'] == 'domestic')}")
+    print(f"{'='*60}")
+    
+    # Step 2: Download audio from AnimalSpeak
+    print(f"\n📥 DOWNLOADING AUDIO FROM ANIMALSPEAK")
+    print(f"{'='*60}")
+    
+    total_files = 0
+    successful_species = 0
+    species_list = list(all_species.keys())
+    
+    for idx, species_name in enumerate(species_list):
+        species_info = all_species[species_name]
+        print(f"\n[{idx+1}/{len(species_list)}] {species_info['common_name']} ({species_name})")
+        print(f"  Type: {species_info['type']} | Continents: {', '.join(species_info['continents'])}")
+        
+        valid, total = download_species_from_animalspeak(
+            species_name, 
+            base_path, 
+            species_info['type'],
+            max_per_species
+        )
+        
+        if valid > 0:
+            successful_species += 1
+            total_files += valid
+            print(f"  ✅ Downloaded {valid}/{total} valid files")
+        else:
+            print(f"  ❌ No valid files found")
+    
+    # Step 3: Save metadata
     metadata = {
-        "source": "iNaturalist API",
-        "description": "Top 20 wild species + top 10 domestic species per continent",
-        "max_recordings_per_species": max_per_species,
-        "total_species_with_valid_audio": dataset_stats["total_species"],
-        "total_valid_files": dataset_stats["total_valid_files"],
-        "total_attempted_downloads": dataset_stats["total_attempted"],
-        "success_rate": f"{dataset_stats['total_valid_files']/dataset_stats['total_attempted']*100:.1f}%" if dataset_stats['total_attempted'] > 0 else "N/A",
-        "continents_processed": list(CONTINENTS.keys())
+        "source": "iNaturalist (species lists) + AnimalSpeak (audio)",
+        "description": "Top 20 wild + top 10 domestic species per continent",
+        "continents": list(CONTINENTS.keys()),
+        "species_by_continent": continent_data,
+        "total_unique_species": len(all_species),
+        "wild_species_count": sum(1 for s in all_species.values() if s['type'] == 'wild'),
+        "domestic_species_count": sum(1 for s in all_species.values() if s['type'] == 'domestic'),
+        "species_with_audio": successful_species,
+        "total_files": total_files,
+        "max_files_per_species": max_per_species,
+        "test_split": TEST_SPLIT
     }
     
     with open(base_path / "dataset_metadata.json", 'w') as f:
         json.dump(metadata, f, indent=2)
     
     print("\n" + "=" * 60)
-    print("REBUILD COMPLETE!")
+    print("COMPLETE!")
     print("=" * 60)
-    print(f"Total species with valid audio: {dataset_stats['total_species']}")
-    print(f"Total valid audio files: {dataset_stats['total_valid_files']}")
-    print(f"Total download attempts: {dataset_stats['total_attempted']}")
-    if dataset_stats['total_attempted'] > 0:
-        print(f"Success rate: {dataset_stats['total_valid_files']/dataset_stats['total_attempted']*100:.1f}%")
-    print(f"Metadata saved: {base_path / 'dataset_metadata.json'}")
+    print(f"Unique species found: {len(all_species)}")
+    print(f"  Wild: {metadata['wild_species_count']}")
+    print(f"  Domestic: {metadata['domestic_species_count']}")
+    print(f"Species with audio: {successful_species}")
+    print(f"Total audio files: {total_files}")
+    print(f"Output: {output_dir}/")
     print("=" * 60)
 
 def main():
-    parser = argparse.ArgumentParser(description='Rebuild top animal sounds dataset')
-    parser.add_argument('--output', default='animal_sounds', help='Output directory')
-    parser.add_argument('--max', type=int, default=10, help='Max recordings per species')
-    parser.add_argument('--delay', type=float, default=1.5, help='API delay in seconds')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--output', default='animal_sounds')
+    parser.add_argument('--max', type=int, default=10, help='Max files per species')
     args = parser.parse_args()
     
-    global RATE_LIMIT_DELAY
-    RATE_LIMIT_DELAY = args.delay
-    
-    rebuild_dataset(args.output, args.max)
+    build_dataset(args.output, args.max)
 
 if __name__ == "__main__":
     main()
