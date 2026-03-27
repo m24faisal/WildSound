@@ -1,0 +1,186 @@
+{
+  "wild": [
+    {
+      "name": "Troglodytes musculus",
+      "common_name": "Southern House Wren",
+      "valid_files": 0,
+      "attempted": 0
+    },
+    {
+      "name": "Ramphastos tucanus",
+      "common_name": "White-throated Toucan",
+      "valid_files": 0,
+      "attempted": 1
+    },
+    {
+      "name": "Pitangus sulphuratus",
+      "common_name": "Great Kiskadee",
+      "valid_files": 0,
+      "attempted": 0
+    },
+    {
+      "name": "Zonotrichia capensis",
+      "common_name": "Rufous-collared Sparrow",
+      "valid_files": 0,
+      "attempted": 0
+    },
+    {
+      "name": "Cyclarhis gujanensis",
+      "common_name": "Rufous-browed Peppershrike",
+      "valid_files": 0,
+      "attempted": 0
+    },
+    {
+      "name": "Turdus rufiventris",
+      "common_name": "Rufous-bellied Thrush",
+      "valid_files": 0,
+      "attempted": 0
+    },
+    {
+      "name": "Antrostomus rufus",
+      "common_name": "Rufous Nightjar",
+      "valid_files": 1,
+      "attempted": 5
+    },
+    {
+      "name": "Lipaugus vociferans",
+      "common_name": "Screaming Piha",
+      "valid_files": 0,
+      "attempted": 1
+    },
+    {
+      "name": "Vanellus chilensis",
+      "common_name": "Southern Lapwing",
+      "valid_files": 0,
+      "attempted": 0
+    },
+    {
+      "name": "Rupornis magnirostris",
+      "common_name": "Roadside Hawk",
+      "valid_files": 0,
+      "attempted": 0
+    },
+    {
+      "name": "Megascops choliba",
+      "common_name": "Tropical Screech-Owl",
+      "valid_files": 0,
+      "attempted": 0
+    },
+    {
+      "name": "Sicalis flaveola",
+      "common_name": "Saffron Finch",
+      "valid_files": 0,
+      "attempted": 0
+    },
+    {
+      "name": "Nyctibius griseus",
+      "common_name": "Common Potoo",
+      "valid_files": 0,
+      "attempted": 0
+    },
+    {
+      "name": "Passer domesticus",
+      "common_name": "House Sparrow",
+      "valid_files": 0,
+      "attempted": 0
+    },
+    {
+      "name": "Myiopsitta monachus",
+      "common_name": "Monk Parakeet",
+      "valid_files": 0,
+      "attempted": 1
+    },
+    {
+      "name": "Turdus leucomelas",
+      "common_name": "Pale-breasted Thrush",
+      "valid_files": 0,
+      "attempted": 0
+    },
+    {
+      "name": "Nyctidromus albicollis",
+      "common_name": "Common Pauraque",
+      "valid_files": 2,
+      "attempted": 2
+    },
+    {
+      "name": "Synallaxis frontalis",
+      "common_name": "Sooty-fronted Spinetail",
+      "valid_files": 2,
+      "attempted": 2
+    },
+    {
+      "name": "Aramides cajaneus",
+      "common_name": "Gray-cowled Wood-Rail",
+      "valid_files": 0,
+      "attempted": 0
+    },
+    {
+      "name": "Colibri coruscans",
+      "common_name": "Sparkling Violetear",
+      "valid_files": 0,
+      "attempted": 0
+    }
+  ],
+  "domestic": [
+    {
+      "name": "Columba livia domestica",
+      "common_name": "Columba Livia Domestica",
+      "valid_files": 0,
+      "attempted": 0
+    },
+    {
+      "name": "Gallus gallus domesticus",
+      "common_name": "Gallus Gallus Domestic",
+      "valid_files": 0,
+      "attempted": 0
+    },
+    {
+      "name": "Canis lupus familiaris",
+      "common_name": "Canis Lupus Familiaris",
+      "valid_files": 0,
+      "attempted": 0
+    },
+    {
+      "name": "Felis catus",
+      "common_name": "Felis Catus",
+      "valid_files": 0,
+      "attempted": 0
+    },
+    {
+      "name": "Numida meleagris",
+      "common_name": "Numida Meleagris",
+      "valid_files": 0,
+      "attempted": 0
+    },
+    {
+      "name": "Anser anser domesticus",
+      "common_name": "Anser Anser Domestic",
+      "valid_files": 0,
+      "attempted": 0
+    },
+    {
+      "name": "Anas platyrhynchos domesticus",
+      "common_name": "Anas Platyrhynchos Domestic",
+      "valid_files": 0,
+      "attempted": 0
+    },
+    {
+      "name": "Serinus canaria domestica",
+      "common_name": "Serinus Canaria Domestica",
+      "valid_files": 1,
+      "attempted": 1
+    },
+    {
+      "name": "Capra hircus",
+      "common_name": "Capra Hircus",
+      "valid_files": 0,
+      "attempted": 0
+    },
+    {
+      "name": "Melopsittacus undulatus",
+      "common_name": "Melopsittacus Undulatus",
+      "valid_files": 0,
+      "attempted": 0
+    }
+  ]
+}
