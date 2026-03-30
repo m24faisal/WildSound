@@ -18,7 +18,7 @@ warnings.filterwarnings('ignore')
 # CONFIGURATION
 # ==========================================
 # GET YOUR FREE API KEY HERE: https://freesound.org/apiv2/apply/
-FREESOUND_API_KEY = "PASTE_YOUR_FREEOUND_API_KEY_HERE"
+FREESOUND_API_KEY = "U6Uuzkrn7l679AuR7a1g0QLXJSw66Gb8Qktlzhxd"
 
 OUTPUT_DIR = Path("continental_animal_db")
 
