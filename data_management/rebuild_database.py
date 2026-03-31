@@ -1,27 +1,25 @@
-# build_wikipedia_ultimate_scraper.py
+# build_youtube_smart_keywords.py
 """
-THE FINAL FIX:
-- Smashes Wikipedia's HTML into one line so broken URLs are forced back together.
+YOUTUBE DOWNLOADER WITH SMART KEYWORDS
+- Uses specific noise verbs (bark, moo, roar, call) based on animal type.
+- Adds "clean sound effect" to avoid podcasts/music.
 """
 
 import requests
 import time
-import re
-from urllib.parse import unquote
 from pathlib import Path
 import warnings
+import yt_dlp
+from typing import Any, cast
 
 warnings.filterwarnings('ignore')
 
 # ==========================================
 # CONFIGURATION
 # ==========================================
-OUTPUT_DIR = Path("final_scraper_db")
+OUTPUT_DIR = Path("youtube_smart_db")
 
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-}
+HEADERS = {'User-Agent': 'WildSoundAppBuilder/1.0'}
 
 CONTINENTS = {
     "north_america": 97394,
@@ -32,31 +30,36 @@ CONTINENTS = {
     "oceania": 97393
 }
 
+# Added specific noise keywords for domestic animals
 DOMESTIC_TAXA = {
-    "Canis lupus familiaris": "Dog",
-    "Felis catus": "Cat",
-    "Bos taurus": "Cow",
-    "Equus caballus": "Horse",
-    "Capra hircus": "Goat",
-    "Ovis aries": "Sheep",
-    "Sus scrofa domesticus": "Pig",
-    "Gallus gallus domesticus": "Chicken",
-    "Anas platyrhynchos domesticus": "Duck",
-    "Meleagris gallopavo": "Turkey"
+    "Canis lupus familiaris": "Dog barking",
+    "Felis catus": "Cat meowing",
+    "Bos taurus": "Cow mooing",
+    "Equus caballus": "Horse neighing",
+    "Capra hircus": "Goat bleating",
+    "Ovis aries": "Sheep baaing",
+    "Sus scrofa domesticus": "Pig oinking",
+    "Gallus gallus domesticus": "Chicken clucking",
+    "Anas platyrhynchos domesticus": "Duck quacking",
+    "Meleagris gallopavo": "Turkey gobbling"
 }
 
 MAX_WILD = 20
 MAX_DOMESTIC = 10
-MAX_FILES = 5
-MIN_FILE_SIZE = 5000 
+MAX_YOUTUBE_FILES = 3 
 
 # ==========================================
-# STEP 1: INATURALIST
+# STEP 1: INATURALIST (Get the List)
 # ==========================================
 def get_exact_species_list(place_id):
     species_list = []
     url = "https://api.inaturalist.org/v1/observations/species_counts"
-    params_wild = {"place_id": place_id, "has[]": "sounds", "verifiable": True, "quality_grade": "research", "per_page": MAX_WILD, "order_by": "count", "order": "desc"}
+    
+    params_wild = {
+        "place_id": place_id, "has[]": "sounds", "verifiable": True,
+        "quality_grade": "research", "per_page": MAX_WILD, 
+        "order_by": "count", "order": "desc"
+    }
     try:
         response = requests.get(url, params=params_wild, headers=HEADERS, timeout=15)
         data = response.json()
@@ -69,7 +72,8 @@ def get_exact_species_list(place_id):
                 species_list.append({'scientific': sci_name, 'common': com_name, 'category': 'Wild', 'class': animal_class})
     except: pass
 
-    for sci_name, com_name in list(DOMESTIC_TAXA.items())[:MAX_DOMESTIC]:
+    for sci_name, search_term in list(DOMESTIC_TAXA.items())[:MAX_DOMESTIC]:
+        com_name = search_term.split()[0] # Just get "Dog" from "Dog barking"
         params_dom = {"taxon_name": sci_name, "place_id": place_id, "has[]": "sounds", "verifiable": True, "per_page": 1}
         try:
             response = requests.get(url, params=params_dom, headers=HEADERS, timeout=15)
@@ -78,91 +82,43 @@ def get_exact_species_list(place_id):
                 species_list.append({'scientific': sci_name, 'common': com_name, 'category': 'Domestic', 'class': 'Domestic'})
             time.sleep(0.2)
         except: pass
+        
     return species_list
 
 # ==========================================
-# STEP 2: WIKIMEDIA API EXTRACTOR
+# STEP 2: YOUTUBE DOWNLOADER
 # ==========================================
-def get_real_url_from_title(file_title):
-    api_url = "https://commons.wikimedia.org/w/api.php"
-    params = {"action": "query", "titles": f"File:{file_title}", "prop": "imageinfo", "iiprop": "url", "format": "json"}
-    try:
-        response = requests.get(api_url, params=params, headers=HEADERS, timeout=10)
-        data = response.json()
-        pages = data.get('query', {}).get('pages', {})
-        for page_id, page_info in pages.items():
-            if page_id == "-1": return None
-            return page_info.get('imageinfo', [{}])[0].get('url')
-    except:
-        pass
-    return None
-
-# ==========================================
-# STEP 3: DOWNLOAD HELPER
-# ==========================================
-def download_file(file_url, save_folder):
-    filename = unquote(file_url.split('/')[-1])
-    filepath = save_folder / filename
-    if filepath.exists(): return 1
-    try:
-        r = requests.get(file_url, headers=HEADERS, timeout=30)
-        if r.status_code == 200:
-            with open(filepath, 'wb') as f: f.write(r.content)
-            if filepath.stat().st_size > MIN_FILE_SIZE: return 1
-            else: filepath.unlink()
-    except:
-        if filepath.exists(): filepath.unlink()
-    return 0
-
-# ==========================================
-# STEP 4: THE SCRAPER (FIXED LINE BREAKS)
-# ==========================================
-def scrape_wikipedia_audio(animal_name, save_folder):
-    downloaded = 0
-    wiki_url = f"https://en.wikipedia.org/wiki/{animal_name.replace(' ', '_')}"
+def download_youtube_audio(search_query, save_folder, max_files):
+    """Takes the exact search query and downloads from YouTube"""
+    
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': str(save_folder / f"%(id)s.%(ext)s"),
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+        'default_search': f'ytsearch{max_files}',
+        'noplaylist': True,
+        'quiet': True,
+        'no_warnings': True,
+        'max_filesize': 10 * 1024 * 1024, # Max 10MB per file
+    }
     
     try:
-        response = requests.get(wiki_url, headers=HEADERS, timeout=15)
-        if response.status_code != 200: return 0
-        
-        # THE FIX: Delete all line breaks in the HTML so split URLs are forced together!
-        html = response.text.replace('\n', '').replace('\r', '')
-        
-        found_urls = set()
-
-        # TRICK 1: Find direct URLs
-        direct_urls = re.findall(r'(?:https?:)?(//upload\.wikimedia\.org/[^"\'<> ]+\.(?:ogg|mp3|wav))', html, re.IGNORECASE)
-        for url in direct_urls:
-            found_urls.add('https:' + url if url.startswith('//') else url)
-
-        # TRICK 2: Find hidden data-mwtitle tags
-        hidden_titles = re.findall(r'data-mwtitle="([^"]+\.(?:ogg|mp3|wav))"', html, re.IGNORECASE)
-        for title in hidden_titles:
-            real_url = get_real_url_from_title(title)
-            if real_url: found_urls.add(real_url)
-
-        # TRICK 3: Find standard /wiki/File: links
-        file_links = re.findall(r'href="/wiki/File:([^"]+\.(?:ogg|mp3|wav))"', html, re.IGNORECASE)
-        for title in file_links:
-            real_url = get_real_url_from_title(title)
-            if real_url: found_urls.add(real_url)
-
-        # Download
-        for file_url in found_urls:
-            if downloaded >= MAX_FILES: break
-            downloaded += download_file(file_url, save_folder)
-            
+        with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
+            ydl.download([search_query])
+        return max_files
     except:
-        pass
-        
-    return downloaded
+        return 0
 
 # ==========================================
-# MAIN
+# MAIN EXECUTION
 # ==========================================
 def main():
     print("=" * 60)
-    print("FINAL WIKIPEDIA SCRAPER")
+    print("SMART KEYWORD YOUTUBE BUILDER")
     print("=" * 60)
 
     total_downloaded = 0
@@ -170,6 +126,7 @@ def main():
     for continent_name, place_id in CONTINENTS.items():
         print(f"\n🌍 {continent_name.upper()}")
         print("-" * 40)
+        
         species_list = get_exact_species_list(place_id)
         if not species_list: continue
             
@@ -186,17 +143,42 @@ def main():
             save_folder.mkdir(parents=True, exist_ok=True)
             
             icon = "🏠" if animal_category == "Domestic" else "🦁"
+            
+            # ==========================================
+            # THE SMART KEYWORD ROUTER
+            # ==========================================
+            if animal_category == "Domestic":
+                # Look up the exact phrase from our dictionary (e.g., "Dog barking")
+                search_term = DOMESTIC_TAXA.get(species['scientific'], com_name)
+                yt_search = f"{search_term} clean sound effect"
+                
+            elif animal_class == "Aves":
+                yt_search = f"{com_name} bird call song clean sound effect"
+                
+            elif animal_class == "Amphibia":
+                yt_search = f"{com_name} frog toad call croaking clean sound effect"
+                
+            elif animal_class == "Reptilia":
+                yt_search = f"{com_name} reptile hiss sound effect clean"
+                
+            else: # Mammals and anything else
+                yt_search = f"{com_name} wild animal sound effect call clean"
+            # ==========================================
+
             print(f"  {icon} [{idx+1}/{len(species_list)}] {com_name}", end=" ... ")
             
-            count = scrape_wikipedia_audio(com_name, save_folder)
+            count = download_youtube_audio(yt_search, save_folder, MAX_YOUTUBE_FILES)
             
-            if count > 0: print(f"✅ {count} files"); total_downloaded += count
-            else: print("❌ No audio on Wikipedia page")
+            if count > 0:
+                print(f"✅ {count} files")
+                total_downloaded += count
+            else:
+                print("❌ Not found")
                     
-            time.sleep(1)
+            time.sleep(2) # Pause to prevent YouTube rate limits
 
     print("\n" + "=" * 60)
-    print(f"🎉 COMPLETE! Scraped {total_downloaded} files.")
+    print(f"🎉 COMPLETE! Downloaded {total_downloaded} targeted files.")
     print("=" * 60)
 
 if __name__ == "__main__":
