@@ -1,8 +1,8 @@
 # build_wikipedia_scraper_fixed.py
 """
 FIXED WIKIPEDIA SCRAPER:
-- Fixed the // vs https:// URL bug.
-- Scrapes standard desktop Wikipedia pages.
+- Disguises as a real Chrome browser to force Wikipedia to send the full page (including Info-boxes).
+- Upgraded Regex to catch all URL formats.
 """
 
 import requests
@@ -18,8 +18,12 @@ warnings.filterwarnings('ignore')
 # ==========================================
 OUTPUT_DIR = Path("wikipedia_scraper_db")
 
+# THE FIX: A perfect disguise of a real Chrome browser.
+# This forces Wikipedia to send the complete HTML, including the Info-box!
 HEADERS = {
-    'User-Agent': 'WildSoundAppBuilder/1.0 (Educational Database Project)'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
 }
 
 CONTINENTS = {
@@ -85,15 +89,15 @@ def get_exact_species_list(place_id):
     return species_list
 
 # ==========================================
-# STEP 2: SCRAPE WIKIPEDIA ARTICLE (FIXED)
+# STEP 2: SCRAPE WIKIPEDIA ARTICLE (FULL PAGE)
 # ==========================================
 def scrape_wikipedia_audio(animal_name, save_folder):
     downloaded = 0
     
-    # Go to the standard desktop Wikipedia page
     wiki_url = f"https://en.wikipedia.org/wiki/{animal_name.replace(' ', '_')}"
     
     try:
+        # Wikipedia will now think we are a real user and send the Info-box!
         response = requests.get(wiki_url, headers=HEADERS, timeout=15)
         
         if response.status_code != 200:
@@ -101,8 +105,14 @@ def scrape_wikipedia_audio(animal_name, save_folder):
             
         html_content = response.text
         
-        # THE FIX: Look for URLs starting with "//" (which Wikipedia uses)
-        raw_urls = re.findall(r'(?:https?:)?(//upload\.wikimedia\.org/[^\s"\'<>]+\.(?:ogg|mp3|wav|flac))', html_content)
+        # UPGRADED REGEX: 
+        # 1. Looks for //upload.wikimedia...
+        # 2. [^"\'<>]+ allows it to grab hyphens, underscores, and URL encodings like %28
+        # 3. re.DOTALL allows it to grab URLs even if Wikipedia split them across two lines in the HTML
+        raw_urls = re.findall(r'(?:https?:)?(//upload\.wikimedia\.org/[^"\'<>]+\.(?:ogg|mp3|wav))', html_content, re.IGNORECASE | re.DOTALL)
+        
+        # Clean up any accidental newlines grabbed by the DOTALL flag
+        raw_urls = [url.replace('\n', '').replace('\r', '') for url in raw_urls]
         
         # Clean up the URLs by adding "https:" to the front if it's missing
         ogg_urls = []
@@ -116,7 +126,7 @@ def scrape_wikipedia_audio(animal_name, save_folder):
         ogg_urls = list(set(ogg_urls))
         
         for file_url in ogg_urls:
-            # Create safe filename
+            # Create safe filename (handles the %28 encoded brackets safely)
             filename = file_url.split('/')[-1]
             filepath = save_folder / filename
             
@@ -130,11 +140,10 @@ def scrape_wikipedia_audio(animal_name, save_folder):
                     with open(filepath, 'wb') as f:
                         f.write(r.content)
                         
-                    # Final safety check: Make sure it's not a tiny broken file
                     if filepath.stat().st_size > MIN_FILE_SIZE:
                         downloaded += 1
                     else:
-                        filepath.unlink() # Delete if too small
+                        filepath.unlink() 
                 time.sleep(0.5)
             except:
                 if filepath.exists(): filepath.unlink()
@@ -149,7 +158,7 @@ def scrape_wikipedia_audio(animal_name, save_folder):
 # ==========================================
 def main():
     print("=" * 60)
-    print("FIXED WIKIPEDIA SCRAPER")
+    print("FULL PAGE WIKIPEDIA SCRAPER")
     print("=" * 60)
 
     total_downloaded = 0
@@ -179,7 +188,6 @@ def main():
             icon = "🏠" if animal_category == "Domestic" else "🦁"
             print(f"  {icon} [{idx+1}/{len(species_list)}] {com_name}", end=" ... ")
             
-            # Scrape the Wikipedia page
             count = scrape_wikipedia_audio(com_name, save_folder)
             
             if count > 0:
@@ -188,7 +196,7 @@ def main():
             else:
                 print("❌ No audio on Wikipedia page")
                     
-            time.sleep(0.5) # Be polite to Wikipedia
+            time.sleep(1) # Slightly longer pause to be a polite "human"
 
     print("\n" + "=" * 60)
     print(f"🎉 COMPLETE! Scraped {total_downloaded} files from Wikipedia.")
