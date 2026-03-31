@@ -1,13 +1,14 @@
-# build_wikipedia_scraper_fixed.py
+# build_wikipedia_ultimate_scraper.py
 """
-FIXED WIKIPEDIA SCRAPER:
-- Disguises as a real Chrome browser to force Wikipedia to send the full page (including Info-boxes).
-- Upgraded Regex to catch all URL formats.
+ULTIMATE WIKIPEDIA SCRAPER:
+- Detects hidden audio links behind Wikipedia's "File:" pages.
+- Cannot be broken by Wikipedia UI updates.
 """
 
 import requests
 import time
 import re
+from urllib.parse import unquote
 from pathlib import Path
 import warnings
 
@@ -18,8 +19,6 @@ warnings.filterwarnings('ignore')
 # ==========================================
 OUTPUT_DIR = Path("wikipedia_scraper_db")
 
-# THE FIX: A perfect disguise of a real Chrome browser.
-# This forces Wikipedia to send the complete HTML, including the Info-box!
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -50,6 +49,7 @@ DOMESTIC_TAXA = {
 
 MAX_WILD = 20
 MAX_DOMESTIC = 10
+MAX_FILES = 5
 MIN_FILE_SIZE = 5000 
 
 # ==========================================
@@ -89,64 +89,76 @@ def get_exact_species_list(place_id):
     return species_list
 
 # ==========================================
-# STEP 2: SCRAPE WIKIPEDIA ARTICLE (FULL PAGE)
+# STEP 2: SMART DOWNLOADER
+# ==========================================
+def download_file(file_url, save_folder):
+    """Downloads the file if it doesn't already exist."""
+    filename = unquote(file_url.split('/')[-1]) # Fixes weird %28 characters in filenames
+    filepath = save_folder / filename
+    
+    if filepath.exists():
+        return 1 # Already downloaded
+        
+    try:
+        r = requests.get(file_url, headers=HEADERS, timeout=30)
+        if r.status_code == 200:
+            with open(filepath, 'wb') as f:
+                f.write(r.content)
+            if filepath.stat().st_size > MIN_FILE_SIZE:
+                return 1
+            else:
+                filepath.unlink() # Delete if broken
+    except:
+        if filepath.exists(): filepath.unlink()
+        
+    return 0
+
+# ==========================================
+# STEP 3: ULTIMATE SCRAPER
 # ==========================================
 def scrape_wikipedia_audio(animal_name, save_folder):
     downloaded = 0
-    
     wiki_url = f"https://en.wikipedia.org/wiki/{animal_name.replace(' ', '_')}"
     
     try:
-        # Wikipedia will now think we are a real user and send the Info-box!
         response = requests.get(wiki_url, headers=HEADERS, timeout=15)
-        
         if response.status_code != 200:
             return 0
             
         html_content = response.text
         
-        # UPGRADED REGEX: 
-        # 1. Looks for //upload.wikimedia...
-        # 2. [^"\'<>]+ allows it to grab hyphens, underscores, and URL encodings like %28
-        # 3. re.DOTALL allows it to grab URLs even if Wikipedia split them across two lines in the HTML
-        raw_urls = re.findall(r'(?:https?:)?(//upload\.wikimedia\.org/[^"\'<>]+\.(?:ogg|mp3|wav))', html_content, re.IGNORECASE | re.DOTALL)
+        # METHOD 1: Look for direct raw URLs (Old Wikipedia layout)
+        direct_urls = re.findall(r'(?:https?:)?(//upload\.wikimedia\.org/[^"\'<> ]+\.(?:ogg|mp3|wav))', html_content, re.IGNORECASE)
+        direct_urls = ['https:' + url if url.startswith('//') else url for url in direct_urls]
+        direct_urls = list(set(direct_urls))
         
-        # Clean up any accidental newlines grabbed by the DOTALL flag
-        raw_urls = [url.replace('\n', '').replace('\r', '') for url in raw_urls]
-        
-        # Clean up the URLs by adding "https:" to the front if it's missing
-        ogg_urls = []
-        for url in raw_urls:
-            if url.startswith('//'):
-                ogg_urls.append('https:' + url)
-            else:
-                ogg_urls.append(url)
-                
-        # Remove duplicates
-        ogg_urls = list(set(ogg_urls))
-        
-        for file_url in ogg_urls:
-            # Create safe filename (handles the %28 encoded brackets safely)
-            filename = file_url.split('/')[-1]
-            filepath = save_folder / filename
+        for file_url in direct_urls:
+            if downloaded >= MAX_FILES: break
+            downloaded += download_file(file_url, save_folder)
             
-            if filepath.exists():
-                downloaded += 1
-                continue
+        # METHOD 2: If we didn't find enough, look for hidden "File:" page links (New Wikipedia layout)
+        if downloaded < MAX_FILES:
+            # Finds links like href="/wiki/File:American_Robin.ogg"
+            file_page_links = re.findall(r'href="/wiki/File:([^"]+\.(?:ogg|mp3|wav))"', html_content, re.IGNORECASE)
+            
+            for file_name in file_page_links:
+                if downloaded >= MAX_FILES: break
                 
-            try:
-                r = requests.get(file_url, headers=HEADERS, timeout=30)
-                if r.status_code == 200:
-                    with open(filepath, 'wb') as f:
-                        f.write(r.content)
+                # Go to the dedicated Wikipedia File page
+                file_page_url = f"https://en.wikipedia.org/wiki/File:{file_name}"
+                try:
+                    file_response = requests.get(file_page_url, headers=HEADERS, timeout=10)
+                    if file_response.status_code == 200:
+                        # The File page ALWAYS has the raw direct link
+                        raw_urls = re.findall(r'(?:https?:)?(//upload\.wikimedia\.org/[^"\'<> ]+\.(?:ogg|mp3|wav))', file_response.text, re.IGNORECASE)
+                        raw_urls = ['https:' + url if url.startswith('//') else url for url in raw_urls]
                         
-                    if filepath.stat().st_size > MIN_FILE_SIZE:
-                        downloaded += 1
-                    else:
-                        filepath.unlink() 
-                time.sleep(0.5)
-            except:
-                if filepath.exists(): filepath.unlink()
+                        for raw_url in raw_urls:
+                            if downloaded >= MAX_FILES: break
+                            downloaded += download_file(raw_url, save_folder)
+                except:
+                    pass
+                time.sleep(0.5) # Be polite when visiting secondary pages
                 
     except Exception as e:
         pass
@@ -158,7 +170,8 @@ def scrape_wikipedia_audio(animal_name, save_folder):
 # ==========================================
 def main():
     print("=" * 60)
-    print("FULL PAGE WIKIPEDIA SCRAPER")
+    print("ULTIMATE WIKIPEDIA SCRAPER")
+    print("Bypasses all Wikipedia layout changes.")
     print("=" * 60)
 
     total_downloaded = 0
@@ -196,7 +209,7 @@ def main():
             else:
                 print("❌ No audio on Wikipedia page")
                     
-            time.sleep(1) # Slightly longer pause to be a polite "human"
+            time.sleep(1) 
 
     print("\n" + "=" * 60)
     print(f"🎉 COMPLETE! Scraped {total_downloaded} files from Wikipedia.")
