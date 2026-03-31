@@ -1,8 +1,7 @@
 # build_youtube_smart_keywords.py
 """
-YOUTUBE DOWNLOADER WITH SMART KEYWORDS & DESCRIPTIVE NAMES
-- Files named: AnimalName_1.mp3, AnimalName_2.mp3, etc.
-- Terminal shows exactly what YouTube search was used.
+YOUTUBE DOWNLOADER WITH SMART KEYWORDS & ERROR SKIP
+- Skips dead/private YouTube videos automatically.
 """
 
 import requests
@@ -88,12 +87,10 @@ def get_exact_species_list(place_id):
 # STEP 2: YOUTUBE DOWNLOADER
 # ==========================================
 def download_youtube_audio(animal_name, search_query, save_folder, max_files):
-    """Takes the exact search query, downloads, and names files after the animal"""
+    """Takes the exact search query, downloads, and skips dead videos"""
     
     ydl_opts = {
         'format': 'bestaudio/best',
-        # FIX: Changed %(id)s to {animal_name}_%(autonumber)d
-        # This will create files like: Northern_Cardinal_1.mp3, Northern_Cardinal_2.mp3
         'outtmpl': str(save_folder / f"{animal_name.replace(' ', '_')}_%(autonumber)d.%(ext)s"),
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
@@ -105,6 +102,7 @@ def download_youtube_audio(animal_name, search_query, save_folder, max_files):
         'quiet': True,
         'no_warnings': True,
         'max_filesize': 10 * 1024 * 1024, 
+        'ignoreerrors': True,  # <--- THE FIX: Tells yt-dlp to skip dead/unavailable videos
     }
     
     try:
@@ -145,7 +143,6 @@ def main():
             
             icon = "🏠" if animal_category == "Domestic" else "🦁"
             
-            # THE SMART KEYWORD ROUTER
             if animal_category == "Domestic":
                 search_term = DOMESTIC_TAXA.get(species['scientific'], com_name)
                 yt_search = f"{search_term} clean sound effect"
@@ -158,11 +155,9 @@ def main():
             else: 
                 yt_search = f"{com_name} wild animal sound effect call clean"
 
-            # FIX: Made the terminal output much more descriptive
             print(f"  {icon} [{idx+1}/{len(species_list)}] {com_name}")
             print(f"      🔍 Searching YouTube for: \"{yt_search}\"", end=" ... ")
             
-            # Pass animal_name to the download function now
             count = download_youtube_audio(com_name, yt_search, save_folder, MAX_YOUTUBE_FILES)
             
             if count > 0:
