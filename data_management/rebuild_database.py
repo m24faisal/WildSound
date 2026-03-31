@@ -193,7 +193,7 @@ def main():
                     
             # THE ANTI-BLOCK FIX: Wait a random amount of time (3 to 8 seconds) 
             # so YouTube thinks you are a human clicking, not a bot scraping.
-            human_delay = random.uniform(3, 8) 
+            human_delay = random.uniform(5, 10) 
             time.sleep(human_delay)
 
     print("\n" + "=" * 60)
