@@ -1,11 +1,14 @@
 # build_youtube_smart_keywords.py
 """
-YOUTUBE DOWNLOADER WITH SMART KEYWORDS & ERROR SKIP
-- Skips dead/private YouTube videos automatically.
+YOUTUBE DOWNLOADER WITH ANTI-BLOCK DEFENSE
+- Searches top 5 videos to skip dead ones.
+- Uses random delays to avoid YouTube IP bans.
+- Pre-cleans .part files.
 """
 
 import requests
 import time
+import random  # <-- ADDED THIS
 from pathlib import Path
 import warnings
 import yt_dlp
@@ -87,29 +90,51 @@ def get_exact_species_list(place_id):
 # STEP 2: YOUTUBE DOWNLOADER
 # ==========================================
 def download_youtube_audio(animal_name, search_query, save_folder, max_files):
-    """Takes the exact search query, downloads, and skips dead videos"""
+    """Downloads with timeouts and cleanup"""
     
+    # PRE-CLEAN: Delete any leftover .part files from previous crashed runs
+    for part_file in save_folder.glob("*.part"):
+        try:
+            part_file.unlink()
+        except:
+            pass
+
     ydl_opts = {
-        'format': 'bestaudio/best',
+        'format': 'bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best',
         'outtmpl': str(save_folder / f"{animal_name.replace(' ', '_')}_%(autonumber)d.%(ext)s"),
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
             'preferredquality': '192',
         }],
-        'default_search': f'ytsearch{max_files}',
+        # FIX: Ask YouTube for the top 5 videos. If 1, 2, and 3 are dead, it grabs 4 and 5.
+        'default_search': 'ytsearch5', 
         'noplaylist': True,
         'quiet': True,
         'no_warnings': True,
         'max_filesize': 10 * 1024 * 1024, 
-        'ignoreerrors': True,  # <--- THE FIX: Tells yt-dlp to skip dead/unavailable videos
+        'ignoreerrors': True, 
+        'socket_timeout': 20, # Prevents the script from freezing forever if YouTube stops responding
     }
     
     try:
         with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
             ydl.download([search_query])
+            
+        # POST-CLEAN: Delete .part files if a last-minute failure happened
+        for part_file in save_folder.glob("*.part"):
+            try:
+                part_file.unlink()
+            except:
+                pass
+            
         return max_files
-    except:
+    except Exception as e:
+        for part_file in save_folder.glob("*.part"):
+            try:
+                part_file.unlink()
+            except:
+                pass
         return 0
 
 # ==========================================
@@ -117,7 +142,7 @@ def download_youtube_audio(animal_name, search_query, save_folder, max_files):
 # ==========================================
 def main():
     print("=" * 60)
-    print("SMART KEYWORD YOUTUBE BUILDER")
+    print("SMART KEYWORD YOUTUBE BUILDER (ANTI-BLOCK)")
     print("=" * 60)
 
     total_downloaded = 0
@@ -161,12 +186,15 @@ def main():
             count = download_youtube_audio(com_name, yt_search, save_folder, MAX_YOUTUBE_FILES)
             
             if count > 0:
-                print(f"\n      ✅ SUCCESS: Saved {count} files as {com_name.replace(' ', '_')}_1.mp3, etc.")
+                print(f"\n      ✅ SUCCESS: Saved files.")
                 total_downloaded += count
             else:
-                print(f"\n      ❌ FAILED: No suitable videos found")
+                print(f"\n      ❌ FAILED: Top 5 videos were dead or blocked.")
                     
-            time.sleep(2) 
+            # THE ANTI-BLOCK FIX: Wait a random amount of time (3 to 8 seconds) 
+            # so YouTube thinks you are a human clicking, not a bot scraping.
+            human_delay = random.uniform(3, 8) 
+            time.sleep(human_delay)
 
     print("\n" + "=" * 60)
     print(f"🎉 COMPLETE! Downloaded {total_downloaded} cleanly named files.")
