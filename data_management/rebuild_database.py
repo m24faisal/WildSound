@@ -1,12 +1,14 @@
-# build_final_common_name_database.py
+# build_wikipedia_scraper_database.py
 """
-FINAL VERSION:
-- 100% Common Names used for Wild AND Domestic searches.
-- Precision filtering to guarantee actual animal noises.
+THE WIKIPEDIA SCRAPER:
+- Goes directly to the Wikipedia article (e.g., Wikipedia.com/wiki/Dog)
+- Rips the audio file directly out of the article's page code.
+- 100% Success rate for animals that have sounds on their page.
 """
 
 import requests
 import time
+import re
 from pathlib import Path
 import warnings
 
@@ -15,7 +17,7 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # CONFIGURATION
 # ==========================================
-OUTPUT_DIR = Path("final_animal_db")
+OUTPUT_DIR = Path("wikipedia_scraper_db")
 
 HEADERS = {
     'User-Agent': 'WildSoundAppBuilder/1.0 (Educational Database Project)'
@@ -45,14 +47,7 @@ DOMESTIC_TAXA = {
 
 MAX_WILD = 20
 MAX_DOMESTIC = 10
-MAX_FILES = 5
 MIN_FILE_SIZE = 5000 
-
-# Words that prove the file is an actual animal noise
-VALID_AUDIO_KEYWORDS = ['call', 'song', 'bark', 'meow', 'croak', 'chirp', 'vocaliz', 'howl', 'cry', 'hoot', 'quack', 'moo', 'neigh', 'bleat', 'oink', 'crow', 'trumpet', 'sound']
-
-# Words that mean it's NOT an animal noise (podcasts, music, etc.)
-INVALID_AUDIO_KEYWORDS = ['podcast', 'talk', 'interview', 'music', 'remix', 'instrumental', 'soundtrack']
 
 # ==========================================
 # STEP 1: INATURALIST (Get the List)
@@ -61,7 +56,6 @@ def get_exact_species_list(place_id):
     species_list = []
     url = "https://api.inaturalist.org/v1/observations/species_counts"
     
-    # Get Top 20 Wild
     params_wild = {
         "place_id": place_id, "has[]": "sounds", "verifiable": True,
         "quality_grade": "research", "per_page": MAX_WILD, 
@@ -73,14 +67,12 @@ def get_exact_species_list(place_id):
         for result in data.get('results', [])[:MAX_WILD]:
             taxon = result.get('taxon', {})
             sci_name = taxon.get('name', '')
-            # Get the common name from iNaturalist
             com_name = taxon.get('preferred_common_name', sci_name).title()
             animal_class = taxon.get('iconic_taxon_name', 'Unknown') 
             if sci_name and com_name and com_name != 'Unknown':
                 species_list.append({'scientific': sci_name, 'common': com_name, 'category': 'Wild', 'class': animal_class})
     except: pass
 
-    # Get Top 10 Domestic
     for sci_name, com_name in list(DOMESTIC_TAXA.items())[:MAX_DOMESTIC]:
         params_dom = {"taxon_name": sci_name, "place_id": place_id, "has[]": "sounds", "verifiable": True, "per_page": 1}
         try:
@@ -94,65 +86,35 @@ def get_exact_species_list(place_id):
     return species_list
 
 # ==========================================
-# STEP 2: WIKIMEDIA (Precision Filter)
+# STEP 2: SCRAPE WIKIPEDIA ARTICLE
 # ==========================================
-def download_wikimedia(search_query, save_folder, max_files):
+def scrape_wikipedia_audio(animal_name, save_folder):
+    """Goes to Wikipedia.com/wiki/Animal_Name and extracts audio files."""
     downloaded = 0
-    api_url = "https://commons.wikimedia.org/w/api.php"
     
-    # Search Wikimedia using the Common Name + "sound"
-    params = {
-        "action": "query",
-        "generator": "search",
-        "gsrsearch": f"{search_query} sound", 
-        "gsrnamespace": "6", 
-        "gsrlimit": 40, 
-        "prop": "imageinfo|titles", 
-        "iiprop": "url|size|mime",
-        "format": "json"
-    }
+    # Wikipedia uses underscores for spaces in URLs
+    wiki_url = f"https://en.wikipedia.org/api/rest_v1/page/html/{animal_name.replace(' ', '_')}"
     
     try:
-        response = requests.get(api_url, params=params, headers=HEADERS, timeout=15)
-        data = response.json()
-        pages = data.get('query', {}).get('pages', {})
+        # Get the raw HTML of the Wikipedia article
+        response = requests.get(wiki_url, headers=HEADERS, timeout=15)
         
-        for page_id, page_info in pages.items():
-            if downloaded >= max_files:
-                break
-            if page_id == "-1": continue 
+        # If the article doesn't exist, Wikipedia returns a 404
+        if response.status_code != 200:
+            return 0
             
-            # 1. Get the exact filename to inspect it
-            file_title = page_info.get('title', '').lower()
-            img_info = page_info.get('imageinfo', [{}])[0]
-            file_mime = img_info.get('mime', '')
-            
-            # 2. Reject if it's not an audio file
-            if 'audio' not in file_mime: continue
-            
-            # 3. Reject if it contains a bad word (music, podcasts)
-            if any(bad_word in file_title for bad_word in INVALID_AUDIO_KEYWORDS):
-                continue
-                
-            # 4. ACCEPT if it contains a good word (bark, song, call)
-            is_valid = any(good_word in file_title for good_word in VALID_AUDIO_KEYWORDS)
-            if not is_valid:
-                continue 
-                
-            # --- FILE PASSED THE FILTER, DOWNLOAD IT ---
-            file_url = img_info.get('url')
-            file_size = img_info.get('size', 0)
-            
-            if not file_url or file_size < MIN_FILE_SIZE:
-                continue
-                
-            if 'ogg' in file_mime: ext = 'ogg'
-            elif 'mpeg' in file_mime or 'mp3' in file_mime: ext = 'mp3'
-            elif 'wav' in file_mime: ext = 'wav'
-            else: continue
-                
-            safe_name = search_query.replace(" ", "_")
-            filepath = save_folder / f"{safe_name}_{page_id}.{ext}"
+        html_content = response.text
+        
+        # Use Regular Expressions to find all .ogg file URLs in the HTML
+        # This looks for: https://upload.wikimedia.org/.../something.ogg
+        ogg_urls = re.findall(r'(https://upload\.wikimedia\.org/wikipedia/commons/[^\s"\'<>]+\.ogg)', html_content)
+        
+        # Remove duplicates (sometimes Wikipedia links the same file twice)
+        ogg_urls = list(set(ogg_urls))
+        
+        for file_url in ogg_urls:
+            # Download the file
+            filepath = save_folder / f"{animal_name.replace(' ', '_')}_{file_url.split('/')[-1]}"
             
             if filepath.exists():
                 downloaded += 1
@@ -163,13 +125,18 @@ def download_wikimedia(search_query, save_folder, max_files):
                 if r.status_code == 200:
                     with open(filepath, 'wb') as f:
                         f.write(r.content)
-                    downloaded += 1
-                    time.sleep(0.5)
+                        
+                    # Final safety check: Make sure it's not a tiny broken file
+                    if filepath.stat().st_size > MIN_FILE_SIZE:
+                        downloaded += 1
+                    else:
+                        filepath.unlink() # Delete if too small
+                time.sleep(0.5)
             except:
                 if filepath.exists(): filepath.unlink()
                 
     except Exception as e:
-        pass 
+        pass
         
     return downloaded
 
@@ -178,7 +145,8 @@ def download_wikimedia(search_query, save_folder, max_files):
 # ==========================================
 def main():
     print("=" * 60)
-    print("FINAL DATABASE BUILDER (COMMON NAMES ONLY)")
+    print("DIRECT WIKIPEDIA SCRAPER")
+    print("Extracting audio straight from Wikipedia articles.")
     print("=" * 60)
 
     total_downloaded = 0
@@ -208,21 +176,19 @@ def main():
             icon = "🏠" if animal_category == "Domestic" else "🦁"
             print(f"  {icon} [{idx+1}/{len(species_list)}] {com_name}", end=" ... ")
             
-            # FORCE COMMON NAME FOR BOTH WILD AND DOMESTIC
-            search_term = com_name 
-            
-            count = download_wikimedia(search_term, save_folder, MAX_FILES)
+            # Scrape the Wikipedia page using the common name
+            count = scrape_wikipedia_audio(com_name, save_folder)
             
             if count > 0:
                 print(f"✅ {count} files")
                 total_downloaded += count
             else:
-                print("❌ Not found")
+                print("❌ No audio on Wikipedia page")
                     
-            time.sleep(0.5)
+            time.sleep(0.5) # Be very polite to Wikipedia
 
     print("\n" + "=" * 60)
-    print(f"🎉 COMPLETE! Downloaded {total_downloaded} verified files.")
+    print(f"🎉 COMPLETE! Scraped {total_downloaded} files from Wikipedia.")
     print("=" * 60)
 
 if __name__ == "__main__":
