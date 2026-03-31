@@ -1,9 +1,7 @@
-# build_ultimate_combined_database.py
+# build_wikipedia_ultimate_scraper.py
 """
-THE NUCLEAR COMBINATION:
-1. Checks for direct URLs (Old Wikipedia)
-2. Checks for hidden "data-mwtitle" tags (New Wikipedia)
-3. Uses the Wikimedia API to convert hidden tags into real download links
+THE FINAL FIX:
+- Smashes Wikipedia's HTML into one line so broken URLs are forced back together.
 """
 
 import requests
@@ -83,18 +81,11 @@ def get_exact_species_list(place_id):
     return species_list
 
 # ==========================================
-# STEP 2: WIKIMEDIA API URL EXTRACTOR
+# STEP 2: WIKIMEDIA API EXTRACTOR
 # ==========================================
 def get_real_url_from_title(file_title):
-    """Takes a hidden filename like 'Pseudacris-crucifer-002.ogg' and asks the API for the real URL"""
     api_url = "https://commons.wikimedia.org/w/api.php"
-    params = {
-        "action": "query",
-        "titles": f"File:{file_title}",
-        "prop": "imageinfo",
-        "iiprop": "url",
-        "format": "json"
-    }
+    params = {"action": "query", "titles": f"File:{file_title}", "prop": "imageinfo", "iiprop": "url", "format": "json"}
     try:
         response = requests.get(api_url, params=params, headers=HEADERS, timeout=10)
         data = response.json()
@@ -124,7 +115,7 @@ def download_file(file_url, save_folder):
     return 0
 
 # ==========================================
-# STEP 4: THE 3-STEP SCRAPER
+# STEP 4: THE SCRAPER (FIXED LINE BREAKS)
 # ==========================================
 def scrape_wikipedia_audio(animal_name, save_folder):
     downloaded = 0
@@ -133,31 +124,30 @@ def scrape_wikipedia_audio(animal_name, save_folder):
     try:
         response = requests.get(wiki_url, headers=HEADERS, timeout=15)
         if response.status_code != 200: return 0
-        html = response.text
+        
+        # THE FIX: Delete all line breaks in the HTML so split URLs are forced together!
+        html = response.text.replace('\n', '').replace('\r', '')
         
         found_urls = set()
 
-        # TRICK 1: Find direct URLs in the old HTML format
+        # TRICK 1: Find direct URLs
         direct_urls = re.findall(r'(?:https?:)?(//upload\.wikimedia\.org/[^"\'<> ]+\.(?:ogg|mp3|wav))', html, re.IGNORECASE)
         for url in direct_urls:
             found_urls.add('https:' + url if url.startswith('//') else url)
 
-        # TRICK 2: Find Wikipedia's new hidden "data-mwtitle" tags
+        # TRICK 2: Find hidden data-mwtitle tags
         hidden_titles = re.findall(r'data-mwtitle="([^"]+\.(?:ogg|mp3|wav))"', html, re.IGNORECASE)
         for title in hidden_titles:
-            # We found the name, but not the URL. Ask the API for the URL.
             real_url = get_real_url_from_title(title)
-            if real_url:
-                found_urls.add(real_url)
+            if real_url: found_urls.add(real_url)
 
-        # TRICK 3: Look for standard /wiki/File: links in case they are used
+        # TRICK 3: Find standard /wiki/File: links
         file_links = re.findall(r'href="/wiki/File:([^"]+\.(?:ogg|mp3|wav))"', html, re.IGNORECASE)
         for title in file_links:
             real_url = get_real_url_from_title(title)
-            if real_url:
-                found_urls.add(real_url)
+            if real_url: found_urls.add(real_url)
 
-        # Download everything we found
+        # Download
         for file_url in found_urls:
             if downloaded >= MAX_FILES: break
             downloaded += download_file(file_url, save_folder)
@@ -172,8 +162,7 @@ def scrape_wikipedia_audio(animal_name, save_folder):
 # ==========================================
 def main():
     print("=" * 60)
-    print("3-STEP WIKIPEDIA SCRAPER")
-    print("Bypasses hidden tags, lazy-loading, and API changes.")
+    print("FINAL WIKIPEDIA SCRAPER")
     print("=" * 60)
 
     total_downloaded = 0
