@@ -1,9 +1,8 @@
-# build_wikipedia_scraper_database.py
+# build_wikipedia_scraper_fixed.py
 """
-THE WIKIPEDIA SCRAPER:
-- Goes directly to the Wikipedia article (e.g., Wikipedia.com/wiki/Dog)
-- Rips the audio file directly out of the article's page code.
-- 100% Success rate for animals that have sounds on their page.
+FIXED WIKIPEDIA SCRAPER:
+- Fixed the // vs https:// URL bug.
+- Scrapes standard desktop Wikipedia pages.
 """
 
 import requests
@@ -86,35 +85,40 @@ def get_exact_species_list(place_id):
     return species_list
 
 # ==========================================
-# STEP 2: SCRAPE WIKIPEDIA ARTICLE
+# STEP 2: SCRAPE WIKIPEDIA ARTICLE (FIXED)
 # ==========================================
 def scrape_wikipedia_audio(animal_name, save_folder):
-    """Goes to Wikipedia.com/wiki/Animal_Name and extracts audio files."""
     downloaded = 0
     
-    # Wikipedia uses underscores for spaces in URLs
-    wiki_url = f"https://en.wikipedia.org/api/rest_v1/page/html/{animal_name.replace(' ', '_')}"
+    # Go to the standard desktop Wikipedia page
+    wiki_url = f"https://en.wikipedia.org/wiki/{animal_name.replace(' ', '_')}"
     
     try:
-        # Get the raw HTML of the Wikipedia article
         response = requests.get(wiki_url, headers=HEADERS, timeout=15)
         
-        # If the article doesn't exist, Wikipedia returns a 404
         if response.status_code != 200:
             return 0
             
         html_content = response.text
         
-        # Use Regular Expressions to find all .ogg file URLs in the HTML
-        # This looks for: https://upload.wikimedia.org/.../something.ogg
-        ogg_urls = re.findall(r'(https://upload\.wikimedia\.org/wikipedia/commons/[^\s"\'<>]+\.ogg)', html_content)
+        # THE FIX: Look for URLs starting with "//" (which Wikipedia uses)
+        raw_urls = re.findall(r'(?:https?:)?(//upload\.wikimedia\.org/[^\s"\'<>]+\.(?:ogg|mp3|wav|flac))', html_content)
         
-        # Remove duplicates (sometimes Wikipedia links the same file twice)
+        # Clean up the URLs by adding "https:" to the front if it's missing
+        ogg_urls = []
+        for url in raw_urls:
+            if url.startswith('//'):
+                ogg_urls.append('https:' + url)
+            else:
+                ogg_urls.append(url)
+                
+        # Remove duplicates
         ogg_urls = list(set(ogg_urls))
         
         for file_url in ogg_urls:
-            # Download the file
-            filepath = save_folder / f"{animal_name.replace(' ', '_')}_{file_url.split('/')[-1]}"
+            # Create safe filename
+            filename = file_url.split('/')[-1]
+            filepath = save_folder / filename
             
             if filepath.exists():
                 downloaded += 1
@@ -145,8 +149,7 @@ def scrape_wikipedia_audio(animal_name, save_folder):
 # ==========================================
 def main():
     print("=" * 60)
-    print("DIRECT WIKIPEDIA SCRAPER")
-    print("Extracting audio straight from Wikipedia articles.")
+    print("FIXED WIKIPEDIA SCRAPER")
     print("=" * 60)
 
     total_downloaded = 0
@@ -176,7 +179,7 @@ def main():
             icon = "🏠" if animal_category == "Domestic" else "🦁"
             print(f"  {icon} [{idx+1}/{len(species_list)}] {com_name}", end=" ... ")
             
-            # Scrape the Wikipedia page using the common name
+            # Scrape the Wikipedia page
             count = scrape_wikipedia_audio(com_name, save_folder)
             
             if count > 0:
@@ -185,7 +188,7 @@ def main():
             else:
                 print("❌ No audio on Wikipedia page")
                     
-            time.sleep(0.5) # Be very polite to Wikipedia
+            time.sleep(0.5) # Be polite to Wikipedia
 
     print("\n" + "=" * 60)
     print(f"🎉 COMPLETE! Scraped {total_downloaded} files from Wikipedia.")
