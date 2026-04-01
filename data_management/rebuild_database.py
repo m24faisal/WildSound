@@ -1,7 +1,8 @@
 # build_strict_quotas_final.py
 """
-FINAL STRICT QUOTA DATABASE BUILDER (TWO-STEP API FIX)
-- Uses a two-step process to bypass iNaturalist's API bug with taxon_id + quality_grade.
+FINAL STRICT QUOTA DATABASE BUILDER (OBSERVATION COUNT FIX)
+- Bypasses broken iNaturalist species_counts endpoint.
+- Manually counts species from standard observations.
 - Target: 12 Birds, 3 Amphibians, 2 Reptiles, 3 Mammals, 10 Domestic per continent.
 """
 
@@ -71,52 +72,51 @@ MAX_FILES = 5
 # STEP 1: INATURALIST GETTERS
 # ==========================================
 def get_wild_by_class(place_id, taxon_id, limit):
-    species_list = []
+    species_list = {}
     
-    # STEP 1: Get top species for this class (NO sounds filter to prevent API bug)
-    url1 = "https://api.inaturalist.org/v1/observations/species_counts"
-    params1 = {
+    # Use standard observations endpoint to bypass the broken species_counts bug
+    url = "https://api.inaturalist.org/v1/observations"
+    params = {
         "place_id": place_id, 
         "taxon_id": taxon_id,      
+        "has[]": "sounds", 
         "verifiable": True,
-        "quality_grade": 1,  
-        "per_page": limit, 
-        "order_by": "count", "order": "desc"
+        "quality_grade": 1,
+        "per_page": 100 
     }
     
     try:
-        response = requests.get(url1, params=params1, headers=HEADERS, timeout=20)
+        response = requests.get(url, params=params, headers=HEADERS, timeout=20)
         data = response.json()
         results = data.get('results', [])
         
-        total_available = data.get('total_results', 0)
-        print(f"         [iNat found {total_available} total. Filtering for sounds...]", end=" ... ")
+        print(f"         [Scanned {len(results)} observations...]", end=" ... ")
         
-        # STEP 2: Loop through and individually verify they have sounds
-        for result in results:
-            taxon = result.get('taxon', {})
+        # Manually count which species appears most often
+        for obs in results:
+            taxon = obs.get('taxon', {})
             sci_name = taxon.get('name', '')
             com_name = taxon.get('preferred_common_name', sci_name).title()
             
             if not sci_name or com_name == 'Unknown':
                 continue
                 
-            url2 = "https://api.inaturalist.org/v1/observations"
-            params2 = {"taxon_name": sci_name, "place_id": place_id, "has[]": "sounds", "verifiable": True, "per_page": 1}
-            
-            try:
-                check_resp = requests.get(url2, params=params2, headers=HEADERS, timeout=10)
-                if check_resp.json().get('total_results', 0) > 0:
-                    species_list.append({'common': com_name, 'class': CLASS_NAMES[taxon_id]})
-                    if len(species_list) >= limit:
-                        break 
-            except:
-                pass
+            if sci_name not in species_list:
+                species_list[sci_name] = {
+                    'common': com_name, 
+                    'class': CLASS_NAMES[taxon_id],
+                    'count': 1
+                }
+            else:
+                species_list[sci_name]['count'] += 1
                 
+        # Sort by highest observation count
+        sorted_species = sorted(species_list.values(), key=lambda x: x['count'], reverse=True)
+        return sorted_species[:limit]
+        
     except Exception as e:
         print(f"         [API ERROR: {e}]", end=" ... ")
-        
-    return species_list
+        return []
 
 def get_domestic(place_id):
     species_list = []
