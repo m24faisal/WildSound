@@ -1,13 +1,16 @@
-# build_strict_quotas.py
+# build_strict_quotas_clean_slate.py
 """
-STRICT QUOTA DATABASE BUILDER
-Enforces exactly: 12 Birds, 3 Amphibians, 2 Reptiles, 3 Mammals, 10 Domestic per continent.
+CLEAN SLATE STRICT QUOTA DATABASE BUILDER
+- Deletes old database folder automatically.
+- No skip logic. Downloads everything fresh.
+- Target: 12 Birds, 3 Amphibians, 2 Reptiles, 3 Mammals, 10 Domestic per continent.
 """
 
 import requests
 import time
 import random
 import concurrent.futures
+import shutil
 from pathlib import Path
 import warnings
 import yt_dlp
@@ -31,13 +34,11 @@ CONTINENTS = {
     "oceania": 97393
 }
 
-# Iconic Taxon IDs for iNaturalist API
 TAXON_BIRDS = 3
 TAXON_AMPHIBIANS = 209
 TAXON_REPTILES = 260
 TAXON_MAMMALS = 40151
 
-# Our strict quotas to equal exactly 20 wild animals
 QUOTAS = {
     TAXON_BIRDS: 12,
     TAXON_AMPHIBIANS: 3,
@@ -71,12 +72,11 @@ MAX_FILES = 5
 # STEP 1: INATURALIST GETTERS
 # ==========================================
 def get_wild_by_class(place_id, taxon_id, limit):
-    """Forces iNaturalist to return exactly 'limit' animals of a specific class"""
     species_list = []
     url = "https://api.inaturalist.org/v1/observations/species_counts"
     params = {
         "place_id": place_id, 
-        "taxon_id": taxon_id,      # THE MAGIC FILTER: Forces Aves, Mammalia, etc.
+        "taxon_id": taxon_id,      
         "has[]": "sounds", "verifiable": True,
         "quality_grade": "research", 
         "per_page": limit, 
@@ -95,7 +95,6 @@ def get_wild_by_class(place_id, taxon_id, limit):
     return species_list
 
 def get_domestic(place_id):
-    """Gets up to 10 domestic animals for the continent"""
     species_list = []
     url = "https://api.inaturalist.org/v1/observations/species_counts"
     for sci_name, yt_search in DOMESTIC_TAXA.items():
@@ -113,13 +112,10 @@ def get_domestic(place_id):
 # STEP 2: YOUTUBE DOWNLOADER
 # ==========================================
 def download_youtube_audio(animal_name, search_query, save_folder, max_files):
+    # Clean up any crashed downloads
     for part_file in save_folder.glob("*.part"):
         try: part_file.unlink()
         except: pass
-
-    # SKIP LOGIC: Don't redownload if we already have 5 files
-    if len(list(save_folder.glob("*.mp3"))) >= max_files:
-        return 0 # Return 0 because we didn't download anything NEW
 
     files_before = len(list(save_folder.glob("*.mp3")))
 
@@ -143,6 +139,7 @@ def download_youtube_audio(animal_name, search_query, save_folder, max_files):
             future.result(timeout=300)
     except: pass
 
+    # Clean up any crashed downloads post-attempt
     for part_file in save_folder.glob("*.part"):
         try: part_file.unlink()
         except: pass
@@ -154,14 +151,22 @@ def download_youtube_audio(animal_name, search_query, save_folder, max_files):
 # ==========================================
 def main():
     print("=" * 60)
-    print("STRICT QUOTA DATABASE BUILDER")
-    print("Target: 12 Birds, 3 Amphibians, 2 Reptiles, 3 Mammals, 10 Domestic")
+    print("CLEAN SLATE STRICT QUOTA DATABASE BUILDER")
     print("=" * 60)
+    
+    # PRE-CLEAN: Delete the old database folder if it exists
+    if OUTPUT_DIR.exists():
+        print("\n🧹 Deleting old database folder...")
+        shutil.rmtree(OUTPUT_DIR)
+        time.sleep(1)
+        
+    print("Target: 12 Birds, 3 Amphibians, 2 Reptiles, 3 Mammals, 10 Domestic")
+    print("Starting fresh from scratch...\n")
 
     total_downloaded = 0
     
     for continent_name, place_id in CONTINENTS.items():
-        print(f"\n🌍 {continent_name.upper()}")
+        print(f"🌍 {continent_name.upper()}")
         print("-" * 40)
         
         master_list = []
@@ -182,7 +187,7 @@ def main():
             animal['category'] = 'Domestic'
             master_list.append(animal)
 
-        # Sort the list just to make the terminal output look nice (Birds -> Amphibians -> Reptiles -> Mammals -> Domestic)
+        # Sort the list (Birds -> Amphibians -> Reptiles -> Mammals -> Domestic)
         class_order = {"Aves": 0, "Amphibia": 1, "Reptilia": 2, "Mammalia": 3, "Domestic": 4}
         master_list.sort(key=lambda x: class_order.get(x['class'], 5))
 
@@ -199,20 +204,40 @@ def main():
             save_folder.mkdir(parents=True, exist_ok=True)
             
             icon = "🏠" if animal_category == "Domestic" else "🦁"
-            print(f"  {icon} [{idx+1}/{len(master_list)}] {com_name} ({animal_class})", end=" ... ")
+            
+            print(f"  {icon} [{idx+1}/{len(master_list)}] {com_name} ({animal_class})")
+            print(f"      🔍 Searching: \"{yt_search}\"", end=" ... ")
             
             count = download_youtube_audio(com_name, yt_search, save_folder, MAX_FILES)
             
+            # BACKUP SEARCH LOGIC 
+            if count == 0:
+                print(f"\n      ⚠️ Primary search failed. Trying backup...", end=" ... ")
+                
+                if animal_class == "Aves":
+                    backup_search = "Wild bird sound vocalization"
+                elif animal_class == "Amphibia":
+                    backup_search = "Wild frog sound vocalization"
+                elif animal_class == "Reptilia":
+                    backup_search = "Wild reptile sound vocalization"
+                elif animal_category == "Domestic":
+                    backup_search = f"{com_name} sound"
+                else: 
+                    backup_search = "Wild mammal sound vocalization"
+                
+                count = download_youtube_audio(com_name, backup_search, save_folder, MAX_FILES)
+            
+            # Descriptive Result Block
             if count > 0:
-                print(f"✅ {count} files")
+                print(f"\n      ✅ SUCCESS: Downloaded {count} new files.")
                 total_downloaded += count
             else:
-                print(f"⏭️ Skipped (Already exists or not found)")
+                print(f"\n      ❌ FAILED: No suitable videos found.")
                     
             time.sleep(random.uniform(2, 5))
 
     print("\n" + "=" * 60)
-    print(f"🎉 COMPLETE! Total new files downloaded: {total_downloaded}")
+    print(f"🎉 COMPLETE! Total files downloaded: {total_downloaded}")
     print("=" * 60)
 
 if __name__ == "__main__":
