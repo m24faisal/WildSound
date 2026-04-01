@@ -1,8 +1,9 @@
 # build_strict_quotas_final.py
 """
-FINAL STRICT QUOTA DATABASE BUILDER (RESEARCH GRADE ID FIX)
-- Uses Quality Grade ID (1) to ensure correct animal identification.
-- Forces exactly: 12 Birds, 3 Amphibians, 2 Reptiles, 3 Mammals, 10 Domestic per continent.
+FINAL STRICT QUOTA DATABASE BUILDER
+- Restored correct API endpoint.
+- Uses Quality Grade ID (1) for correct animal identification.
+- Target: 12 Birds, 3 Amphibians, 2 Reptiles, 3 Mammals, 10 Domestic per continent.
 """
 
 import requests
@@ -72,6 +73,7 @@ MAX_FILES = 5
 # ==========================================
 def get_wild_by_class(place_id, taxon_id, limit):
     species_list = []
+    # THE CORRECT ENDPOINT
     url = "https://api.inaturalist.org/v1/observations/species_counts"
     
     params = {
@@ -79,7 +81,7 @@ def get_wild_by_class(place_id, taxon_id, limit):
         "taxon_id": taxon_id,      
         "has[]": "sounds", 
         "verifiable": True,
-        "quality_grade": 1,  # THE FIX: Hardcoded ID for "Research Grade"
+        "quality_grade": 1,  # Hardcoded ID for "Research Grade"
         "per_page": limit, 
         "order_by": "count", "order": "desc"
     }
@@ -87,7 +89,6 @@ def get_wild_by_class(place_id, taxon_id, limit):
         response = requests.get(url, params=params, headers=HEADERS, timeout=15)
         data = response.json()
         
-        # DEBUG: Show us exactly what iNaturalist returned for this class
         total_available = data.get('total_results', 0)
         print(f"         [iNat API returned {total_available} total]", end=" ... ")
         
@@ -246,7 +247,7 @@ def main():
             else:
                 print(f"\n      ❌ FAILED.")
                     
-            time.sleep(random.uniform(5, 10))
+            time.sleep(random.uniform(2, 5))
 
     print("\n" + "=" * 60)
     print(f"🎉 COMPLETE! Total files downloaded: {total_downloaded}")
