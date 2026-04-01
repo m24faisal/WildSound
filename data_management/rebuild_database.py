@@ -1,8 +1,8 @@
 # build_multi_api_simple.py
 """
-MULTI-API DATABASE BUILDER
-- 12 Birds strictly from eBird (with respectful API timer).
-- 8 Other Wild animals from iNaturalist (Naturally includes Mammals, Reptiles, Amphibians).
+MULTI-API DATABASE BUILDER (VERIFIED AUDIO EDITION)
+- 12 Birds strictly from eBird.
+- 8 Other Wild animals from iNaturalist (Two-step audio verification process).
 - 10 Domestic animals from iNaturalist.
 """
 
@@ -87,7 +87,7 @@ def get_birds_ebird(country_code, limit=12):
                         'yt_search': f"{com_name} sound vocalization"
                     })
             
-            time.sleep(1) # Respectful timer for eBird API to prevent IP bans
+            time.sleep(1) # Respectful timer for eBird API
             
     except Exception as e:
         print(f"         [eBird Error]", end=" ... ")
@@ -96,41 +96,65 @@ def get_birds_ebird(country_code, limit=12):
     return species_list
 
 def get_wild_inat(place_id, limit=8):
-    """Gets top wild animals, naturally includes reptiles/amphibians/mammals"""
+    """Two-step process: Get popular animals, then quietly verify they have audio."""
     species_list = []
-    url = "https://api.inaturalist.org/v1/observations/species_counts"
+    url_top = "https://api.inaturalist.org/v1/observations/species_counts"
+    url_check = "https://api.inaturalist.org/v1/observations"
     
-    params = {
+    # STEP 1: Get top 50 popular wild animals (bypasses the API bug)
+    params_top = {
         "place_id": place_id, 
-        "has[]": "sounds", 
         "verifiable": True,
         "quality_grade": "research", 
-        "per_page": limit, 
-        "order_by": "count", "order": "desc"
+        "per_page": 50 
     }
     
     try:
-        response = requests.get(url, params=params, headers=INAT_HEADERS, timeout=15)
+        response = requests.get(url_top, params=params_top, headers=INAT_HEADERS, timeout=15)
         data = response.json()
         results = data.get('results', [])
         
-        # Filter out birds so we don't duplicate the eBird list
+        verified_count = 0
+        
+        # STEP 2: For each animal, quickly verify it has audio
         for result in results:
+            if verified_count >= limit:
+                break # Stop once we found enough with audio
+                
             taxon = result.get('taxon', {})
             if taxon.get('iconic_taxon_name') == 'Aves':
-                continue
+                continue # Skip birds, eBird handles them
                 
             sci_name = taxon.get('name', '')
             com_name = taxon.get('preferred_common_name', sci_name).title()
-            if sci_name and com_name and com_name != 'Unknown':
-                animal_class = taxon.get('iconic_taxon_name', 'Unknown')
-                species_list.append({
-                    'common': com_name, 
-                    'class': animal_class,
-                    'yt_search': f"{com_name} sound vocalization"
-                })
+            if not sci_name or com_name == 'Unknown':
+                continue
                 
-        print(f"         [iNat Wild: {len(species_list)} others]", end=" ... ")
+            # Quietly ask iNaturalist: "Does this specific animal have sound files?"
+            params_check = {
+                "taxon_name": sci_name, 
+                "place_id": place_id, 
+                "has[]": "sounds", 
+                "verifiable": True, 
+                "per_page": 1
+            }
+            
+            try:
+                check_resp = requests.get(url_check, params=params_check, headers=INAT_HEADERS, timeout=5)
+                if check_resp.json().get('total_results', 0) > 0:
+                    # YES it has audio! Add it to our list
+                    animal_class = taxon.get('iconic_taxon_name', 'Unknown')
+                    species_list.append({
+                        'common': com_name, 
+                        'class': animal_class,
+                        'yt_search': f"{com_name} sound vocalization"
+                    })
+                    verified_count += 1
+            except:
+                pass # If the check fails, just skip it and move to the next animal
+                
+        print(f"         [iNat Verified {verified_count} with audio]", end=" ... ")
+        
     except Exception as e:
         print(f"         [iNat Error]", end=" ... ")
         
@@ -203,7 +227,7 @@ def main():
         print("Go to: https://ebird.org/api/keygen")
         return
 
-    print("Birds -> eBird | Others -> iNaturalist")
+    print("Birds -> eBird | Others -> iNaturalist (Audio Verified)")
     print("Starting fresh from scratch...\n")
 
     total_downloaded = 0
@@ -220,7 +244,7 @@ def main():
         master_list.extend(get_birds_ebird(CONTINENTS_EBIRD[continent_name], limit=12))
         time.sleep(1)
 
-        # 2. Get OTHER WILD from iNaturalist
+        # 2. Get OTHER WILD from iNaturalist (Two-step verification)
         print(f"  Fetching Wild Mammals/Reptiles/Amphibians (iNaturalist)...")
         master_list.extend(get_wild_inat(CONTINENTS_INAT[continent_name], limit=8))
         time.sleep(0.5)
@@ -282,7 +306,7 @@ def main():
                     
             time.sleep(random.uniform(2, 5))
 
-    print("\n" + "=" * 60)
+    print("\n============================================================")
     print(f"🎉 COMPLETE! Total files downloaded: {total_downloaded}")
     print("=" * 60)
 
