@@ -1,7 +1,7 @@
 # build_multi_api_simple.py
 """
 MULTI-API DATABASE BUILDER
-- 12 Birds strictly from eBird.
+- 12 Birds strictly from eBird (with respectful API timer).
 - 8 Other Wild animals from iNaturalist (Naturally includes Mammals, Reptiles, Amphibians).
 - 10 Domestic animals from iNaturalist.
 """
@@ -86,8 +86,12 @@ def get_birds_ebird(country_code, limit=12):
                         'class': 'Aves', 
                         'yt_search': f"{com_name} sound vocalization"
                     })
+            
+            time.sleep(1) # Respectful timer for eBird API to prevent IP bans
+            
     except Exception as e:
         print(f"         [eBird Error]", end=" ... ")
+        time.sleep(2)
         
     return species_list
 
@@ -276,7 +280,7 @@ def main():
             else:
                 print(f"\n      ❌ FAILED.")
                     
-            time.sleep(random.uniform(5, 10))
+            time.sleep(random.uniform(2, 5))
 
     print("\n" + "=" * 60)
     print(f"🎉 COMPLETE! Total files downloaded: {total_downloaded}")
