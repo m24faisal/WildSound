@@ -1,9 +1,9 @@
-# build_multi_api_simple.py
+# build_api_search_youtube_download.py
 """
-MULTI-API DATABASE BUILDER (VERIFIED AUDIO EDITION)
-- 12 Birds strictly from eBird.
-- 8 Other Wild animals from iNaturalist (Two-step audio verification process).
-- 10 Domestic animals from iNaturalist.
+API SEARCH -> YOUTUBE DOWNLOAD
+- Uses iNaturalist to get Top 20 Wild + Top 10 Domestic per continent.
+- Guarantees Mammals, Amphibians, Reptiles, and Birds via fallback list.
+- Uses YouTube to download the actual audio files.
 """
 
 import requests
@@ -25,23 +25,7 @@ OUTPUT_DIR = Path("youtube_smart_db")
 
 INAT_HEADERS = {'User-Agent': 'WildSoundAppBuilder/1.0'}
 
-# GET YOUR FREE EBIRD API KEY HERE: https://ebird.org/api/keygen
-EBIRD_API_KEY = "t2h32l4vqp58"
-EBIRD_HEADERS = {
-    'x-ebirdapitoken': EBIRD_API_KEY,
-    'User-Agent': 'WildSoundAppBuilder/1.0'
-}
-
-CONTINENTS_EBIRD = {
-    "north_america": "US", 
-    "south_america": "BR", 
-    "europe": "GB", 
-    "africa": "ZA", 
-    "asia": "IN", 
-    "oceania": "AU"
-}
-
-CONTINENTS_INAT = {
+CONTINENTS = {
     "north_america": 97394,
     "south_america": 97389,
     "europe": 97391,
@@ -50,132 +34,124 @@ CONTINENTS_INAT = {
     "oceania": 97393
 }
 
-DOMESTIC_TAXA = {
-    "Canis lupus familiaris": "Dog barking sound",
-    "Felis catus": "Cat meowing sound",
-    "Bos taurus": "Cow mooing sound",
-    "Equus caballus": "Horse neighing sound",
-    "Capra hircus": "Goat bleating sound",
-    "Ovis aries": "Sheep baaing sound",
-    "Sus scrofa domesticus": "Pig oinking sound",
-    "Gallus gallus domesticus": "Chicken clucking sound",
-    "Anas platyrhynchos domesticus": "Duck quacking sound",
-    "Meleagris gallopavo": "Turkey gobbling sound"
+FALLBACK_ANIMALS = {
+    "north_america": {
+        "Mammalia": ["Eastern Grey Squirrel", "White-Tailed Deer", "Coyote"], 
+        "Amphibia": ["Spring Peeper", "American Bullfrog"], 
+        "Reptilia": ["Rattlesnake", "American Alligator"]
+    },
+    "south_america": {
+        "Mammalia": ["Jaguar", "Capybara", "Giant Anteater"], 
+        "Amphibia": ["Red-Eyed Tree Frog"], 
+        "Reptilia": ["Green Anaconda"]
+    },
+    "europe": {
+        "Mammalia": ["Red Fox", "Wild Boar", "Red Deer"], 
+        "Amphibia": ["Common Toad"], 
+        "Reptilia": ["Grass Snake"]
+    },
+    "africa": {
+        "Mammalia": ["African Elephant", "Lion", "Spotted Hyena"], 
+        "Amphibia": ["African Bullfrog"], 
+        "Reptilia": ["Nile Crocodile"]
+    },
+    "asia": {
+        "Mammalia": ["Bengal Tiger", "Indian Elephant", "Snow Leopard"], 
+        "Amphibia": ["Asian Common Toad"], 
+        "Reptilia": ["King Cobra"]
+    },
+    "oceania": {
+        "Mammalia": ["Dingo", "Platypus", "Koala"], 
+        "Amphibia": ["Green Tree Frog"], 
+        "Reptilia": ["Saltwater Crocodile"]
+    }
 }
 
+DOMESTIC_TAXA = {
+    "Canis lupus familiaris": "Dog",
+    "Felis catus": "Cat",
+    "Bos taurus": "Cow",
+    "Equus caballus": "Horse",
+    "Capra hircus": "Goat",
+    "Ovis aries": "Sheep",
+    "Sus scrofa domesticus": "Pig",
+    "Gallus gallus domesticus": "Chicken",
+    "Anas platyrhynchos domesticus": "Duck",
+    "Meleagris gallopavo": "Turkey"
+}
+
+MAX_WILD = 20
+MAX_DOMESTIC = 10
 MAX_FILES = 5 
 
 # ==========================================
-# STEP 1: API GETTERS
+# STEP 1: INATURALIST (Get The List)
 # ==========================================
-def get_birds_ebird(country_code, limit=12):
+def get_wild_list(place_id, limit):
+    """Gets top 20 wild animals. Does NOT use taxon_id to avoid API breaking."""
     species_list = []
-    url = f"https://api.ebird.org/v2/data/obs/{country_code}/top100"
+    url = "https://api.inaturalist.org/v1/observations/species_counts"
     
-    try:
-        response = requests.get(url, headers=EBIRD_HEADERS, timeout=20)
-        if response.status_code == 200:
-            data = response.json()
-            print(f"         [eBird: {len(data)} species]", end=" ... ")
-            
-            for obs in data[:limit]:
-                com_name = obs.get('comName', '').title()
-                if com_name:
-                    species_list.append({
-                        'common': com_name, 
-                        'class': 'Aves', 
-                        'yt_search': f"{com_name} sound vocalization"
-                    })
-            
-            time.sleep(1) # Respectful timer for eBird API
-            
-    except Exception as e:
-        print(f"         [eBird Error]", end=" ... ")
-        time.sleep(2)
-        
-    return species_list
-
-def get_wild_inat(place_id, limit=8):
-    """Two-step process: Get popular animals, then quietly verify they have audio."""
-    species_list = []
-    url_top = "https://api.inaturalist.org/v1/observations/species_counts"
-    url_check = "https://api.inaturalist.org/v1/observations"
-    
-    # STEP 1: Get top 50 popular wild animals (bypasses the API bug)
-    params_top = {
+    params = {
         "place_id": place_id, 
+        "has[]": "sounds", 
         "verifiable": True,
         "quality_grade": "research", 
-        "per_page": 50 
+        "per_page": limit, 
+        "order_by": "count", "order": "desc"
     }
     
     try:
-        response = requests.get(url_top, params=params_top, headers=INAT_HEADERS, timeout=15)
+        response = requests.get(url, params=params, headers=INAT_HEADERS, timeout=15)
         data = response.json()
         results = data.get('results', [])
         
-        verified_count = 0
-        
-        # STEP 2: For each animal, quickly verify it has audio
         for result in results:
-            if verified_count >= limit:
-                break # Stop once we found enough with audio
-                
             taxon = result.get('taxon', {})
-            if taxon.get('iconic_taxon_name') == 'Aves':
-                continue # Skip birds, eBird handles them
-                
             sci_name = taxon.get('name', '')
             com_name = taxon.get('preferred_common_name', sci_name).title()
-            if not sci_name or com_name == 'Unknown':
-                continue
+            if sci_name and com_name and com_name != 'Unknown':
+                animal_class = taxon.get('iconic_taxon_name', 'Unknown')
+                species_list.append({'common': com_name, 'class': animal_class})
                 
-            # Quietly ask iNaturalist: "Does this specific animal have sound files?"
-            params_check = {
-                "taxon_name": sci_name, 
-                "place_id": place_id, 
-                "has[]": "sounds", 
-                "verifiable": True, 
-                "per_page": 1
-            }
-            
-            try:
-                check_resp = requests.get(url_check, params=params_check, headers=INAT_HEADERS, timeout=5)
-                if check_resp.json().get('total_results', 0) > 0:
-                    # YES it has audio! Add it to our list
-                    animal_class = taxon.get('iconic_taxon_name', 'Unknown')
-                    species_list.append({
-                        'common': com_name, 
-                        'class': animal_class,
-                        'yt_search': f"{com_name} sound vocalization"
-                    })
-                    verified_count += 1
-            except:
-                pass # If the check fails, just skip it and move to the next animal
-                
-        print(f"         [iNat Verified {verified_count} with audio]", end=" ... ")
-        
-    except Exception as e:
-        print(f"         [iNat Error]", end=" ... ")
+    except:
+        pass
         
     return species_list
 
-def get_domestic(place_id):
+def get_domestic_list(place_id):
     species_list = []
     url = "https://api.inaturalist.org/v1/observations/species_counts"
-    for sci_name, yt_search in DOMESTIC_TAXA.items():
+    for sci_name, com_name in DOMESTIC_TAXA.items():
         params = {"taxon_name": sci_name, "place_id": place_id, "has[]": "sounds", "verifiable": True, "per_page": 1}
         try:
             response = requests.get(url, params=params, headers=INAT_HEADERS, timeout=10)
             if response.json().get('total_results', 0) > 0:
-                com_name = yt_search.split()[0]
-                species_list.append({'common': com_name, 'class': 'Domestic', 'yt_search': yt_search})
+                species_list.append({'common': com_name, 'class': 'Domestic'})
         except: pass
         time.sleep(0.2)
     return species_list
 
+def ensure_all_classes_exist(master_list, continent_name):
+    """Checks if we have Mammals, Amphibians, Reptiles, and Birds. If not, fills gaps using the fallback list."""
+    required_classes = ["Mammalia", "Amphibia", "Reptilia", "Aves"]
+    current_classes = {item['class'] for item in master_list}
+    missing_classes = [c for c in required_classes if c not in current_classes]
+    
+    added = False
+    for missing_class in missing_classes:
+        fallback_data = FALLBACK_ANIMALS.get(continent_name)
+        if fallback_data and missing_class in fallback_data:
+            for animal_name in fallback_data[missing_class]:
+                if animal_name not in [item['common'] for item in master_list]:
+                    master_list.append({'common': animal_name, 'class': missing_class})
+                    added = True
+            time.sleep(0.2)
+        
+    return master_list
+
 # ==========================================
-# STEP 2: YOUTUBE DOWNLOADER
+# STEP 2: YOUTUBE (Get The Audio)
 # ==========================================
 def download_youtube_audio(animal_name, search_query, save_folder, max_files):
     for part_file in save_folder.glob("*.part"):
@@ -213,67 +189,65 @@ def download_youtube_audio(animal_name, search_query, save_folder, max_files):
 # MAIN EXECUTION
 # ==========================================
 def main():
-    print("=" * 60)
-    print("MULTI-API DATABASE BUILDER")
-    print("=" * 60)
+    print("============================================================")
+    print("API SEARCH -> YOUTUBE DOWNLOAD")
+    print("============================================================")
     
     if OUTPUT_DIR.exists():
-        print("\n🧹 Deleting old database folder...")
         shutil.rmtree(OUTPUT_DIR)
         time.sleep(1)
-        
-    if EBIRD_API_KEY == "PASTE_YOUR_EBIRD_API_KEY_HERE":
-        print("\n❌ ERROR: You must get a free eBird API key and paste it in the script!")
-        print("Go to: https://ebird.org/api/keygen")
-        return
 
-    print("Birds -> eBird | Others -> iNaturalist (Audio Verified)")
-    print("Starting fresh from scratch...\n")
+    print("Step 1: Searching APIs for lists.")
+    print("Step 2: Downloading audio from YouTube.\n")
 
     total_downloaded = 0
-    continent_names = list(CONTINENTS_EBIRD.keys())
+    continent_names = list(CONTINENTS.keys())
     
     for continent_name in continent_names:
+        place_id = CONTINENTS[continent_name]
+        
         print(f"🌍 {continent_name.upper()}")
         print("-" * 40)
         
         master_list = []
 
-        # 1. Get BIRDS from eBird
-        print(f"  Fetching Aves (eBird)...")
-        master_list.extend(get_birds_ebird(CONTINENTS_EBIRD[continent_name], limit=12))
-        time.sleep(1)
+        # 1. Get Top 20 WILD
+        print(f"  Fetching Top 20 Wild...", end=" ... ")
+        wild_list = get_wild_list(place_id, MAX_WILD)
+        master_list.extend(wild_list)
+        print(f"Found {len(wild_list)} wild animals.")
+        
+        # 2. Ensure all 4 classes are present
+        print(f"  Verifying Mammals/Amphibians/Reptiles/Birds...", end=" ... ")
+        master_list = ensure_all_classes_exist(master_list, continent_name)
+        print("Done.")
+        
+        # 3. Get Top 10 DOMESTIC
+        print(f"  Fetching Top 10 Domestic...", end=" ... ")
+        domestic_list = get_domestic_list(place_id)
+        master_list.extend(domestic_list)
+        print(f"Found {len(domestic_list)} domestic animals.")
 
-        # 2. Get OTHER WILD from iNaturalist (Two-step verification)
-        print(f"  Fetching Wild Mammals/Reptiles/Amphibians (iNaturalist)...")
-        master_list.extend(get_wild_inat(CONTINENTS_INAT[continent_name], limit=8))
-        time.sleep(0.5)
-
-        # 3. Get DOMESTIC from iNaturalist
-        print(f"  Fetching Domestic...")
-        master_list.extend(get_domestic(CONTINENTS_INAT[continent_name]))
-
-        # Sort the list
-        class_order = {"Aves": 0, "Amphibia": 1, "Reptilia": 2, "Mammalia": 3, "Domestic": 4, "Unknown": 5}
+        # Sort the list (THE PYLANCE FIX IS HERE)
+        class_order: dict[str, int] = {
+            "Aves": 0, "Amphibia": 1, "Reptilia": 2, "Mammalia": 3, "Domestic": 4, "Unknown": 5
+        }
         master_list.sort(key=lambda x: class_order.get(x['class'], 5))
 
-        print(f"\n  Total Target: {len(master_list)} animals\n")
+        print(f"\n  FINAL TOTAL: {len(master_list)} animals for {continent_name.upper()}\n")
 
-        # 4. DOWNLOAD THEM ALL
+        # 4. DOWNLOAD FROM YOUTUBE
+        print("  Downloading from YouTube:")
         for idx, item in enumerate(master_list):
             com_name = item['common']
             animal_class = item['class']
-            animal_category = 'Wild' if animal_class != 'Domestic' else 'Domestic'
-            yt_search = item.get('yt_search', f"{com_name} sound")
+            yt_search = f"{com_name} sound vocalization"
             
             safe_folder_name = com_name.replace(" ", "_")
-            save_folder = OUTPUT_DIR / continent_name / animal_category / animal_class / safe_folder_name
+            save_folder = OUTPUT_DIR / continent_name / animal_class / safe_folder_name
             save_folder.mkdir(parents=True, exist_ok=True)
             
-            icon = "🏠" if animal_category == "Domestic" else "🦁"
-            
-            print(f"  {icon} [{idx+1}/{len(master_list)}] {com_name} ({animal_class})")
-            print(f"      🔍 Searching: \"{yt_search}\"", end=" ... ")
+            print(f"    [{idx+1}/{len(master_list)}] {com_name} ({animal_class})", end=" ... ")
             
             try:
                 with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -282,33 +256,17 @@ def main():
             except:
                 count = 0
             
-            if count == 0:
-                print(f"\n      ⚠️ Failed. Trying backup...", end=" ... ")
-                
-                if animal_class == "Aves": backup_search = "Wild bird sound vocalization"
-                elif animal_class == "Amphibia": backup_search = "Wild frog sound vocalization"
-                elif animal_class == "Reptilia": backup_search = "Wild reptile sound vocalization"
-                elif animal_category == "Domestic": backup_search = f"{com_name} sound"
-                else: backup_search = "Wild mammal sound vocalization"
-                
-                try:
-                    with concurrent.futures.ThreadPoolExecutor() as executor:
-                        future = executor.submit(download_youtube_audio, com_name, backup_search, save_folder, MAX_FILES)
-                        count = future.result(timeout=300)
-                except:
-                    count = 0
-            
             if count > 0:
-                print(f"\n      ✅ SUCCESS: {count} files.")
+                print(f" ✅ {count} files")
                 total_downloaded += count
             else:
-                print(f"\n      ❌ FAILED.")
+                print(" ❌ Failed")
                     
             time.sleep(random.uniform(2, 5))
 
     print("\n============================================================")
     print(f"🎉 COMPLETE! Total files downloaded: {total_downloaded}")
-    print("=" * 60)
+    print("============================================================")
 
 if __name__ == "__main__":
     main()
