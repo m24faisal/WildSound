@@ -1,8 +1,7 @@
 # build_strict_quotas_final.py
 """
-FINAL STRICT QUOTA DATABASE BUILDER
-- Restored correct API endpoint.
-- Uses Quality Grade ID (1) for correct animal identification.
+FINAL STRICT QUOTA DATABASE BUILDER (TWO-STEP API FIX)
+- Uses a two-step process to bypass iNaturalist's API bug with taxon_id + quality_grade.
 - Target: 12 Birds, 3 Amphibians, 2 Reptiles, 3 Mammals, 10 Domestic per continent.
 """
 
@@ -73,33 +72,49 @@ MAX_FILES = 5
 # ==========================================
 def get_wild_by_class(place_id, taxon_id, limit):
     species_list = []
-    # THE CORRECT ENDPOINT
-    url = "https://api.inaturalist.org/v1/observations/species_counts"
     
-    params = {
+    # STEP 1: Get top species for this class (NO sounds filter to prevent API bug)
+    url1 = "https://api.inaturalist.org/v1/observations/species_counts"
+    params1 = {
         "place_id": place_id, 
         "taxon_id": taxon_id,      
-        "has[]": "sounds", 
         "verifiable": True,
-        "quality_grade": 1,  # Hardcoded ID for "Research Grade"
+        "quality_grade": 1,  
         "per_page": limit, 
         "order_by": "count", "order": "desc"
     }
+    
     try:
-        response = requests.get(url, params=params, headers=HEADERS, timeout=15)
+        response = requests.get(url1, params=params1, headers=HEADERS, timeout=20)
         data = response.json()
+        results = data.get('results', [])
         
         total_available = data.get('total_results', 0)
-        print(f"         [iNat API returned {total_available} total]", end=" ... ")
+        print(f"         [iNat found {total_available} total. Filtering for sounds...]", end=" ... ")
         
-        for result in data.get('results', [])[:limit]:
+        # STEP 2: Loop through and individually verify they have sounds
+        for result in results:
             taxon = result.get('taxon', {})
             sci_name = taxon.get('name', '')
             com_name = taxon.get('preferred_common_name', sci_name).title()
-            if sci_name and com_name and com_name != 'Unknown':
-                species_list.append({'common': com_name, 'class': CLASS_NAMES[taxon_id]})
+            
+            if not sci_name or com_name == 'Unknown':
+                continue
+                
+            url2 = "https://api.inaturalist.org/v1/observations"
+            params2 = {"taxon_name": sci_name, "place_id": place_id, "has[]": "sounds", "verifiable": True, "per_page": 1}
+            
+            try:
+                check_resp = requests.get(url2, params=params2, headers=HEADERS, timeout=10)
+                if check_resp.json().get('total_results', 0) > 0:
+                    species_list.append({'common': com_name, 'class': CLASS_NAMES[taxon_id]})
+                    if len(species_list) >= limit:
+                        break 
+            except:
+                pass
+                
     except Exception as e:
-        print(f"         [iNat API ERROR: {e}]", end=" ... ")
+        print(f"         [API ERROR: {e}]", end=" ... ")
         
     return species_list
 
@@ -247,7 +262,7 @@ def main():
             else:
                 print(f"\n      ❌ FAILED.")
                     
-            time.sleep(random.uniform(5, 10))
+            time.sleep(random.uniform(2, 5))
 
     print("\n" + "=" * 60)
     print(f"🎉 COMPLETE! Total files downloaded: {total_downloaded}")
