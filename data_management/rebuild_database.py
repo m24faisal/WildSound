@@ -1,8 +1,8 @@
-# build_strict_quotas_clean_slate.py
+# build_strict_quotas_final.py
 """
-CLEAN SLATE STRICT QUOTA DATABASE BUILDER
+FINAL STRICT QUOTA DATABASE BUILDER
 - Deletes old database folder automatically.
-- No skip logic. Downloads everything fresh.
+- Searches both "Research" and "Needs ID" grades to find elusive reptiles/amphibians.
 - Target: 12 Birds, 3 Amphibians, 2 Reptiles, 3 Mammals, 10 Domestic per continent.
 """
 
@@ -72,13 +72,15 @@ MAX_FILES = 5
 # STEP 1: INATURALIST GETTERS
 # ==========================================
 def get_wild_by_class(place_id, taxon_id, limit):
+    """Forces iNaturalist to return exactly 'limit' animals of a specific class"""
     species_list = []
     url = "https://api.inaturalist.org/v1/observations/species_counts"
     params = {
         "place_id": place_id, 
         "taxon_id": taxon_id,      
-        "has[]": "sounds", "verifiable": True,
-        "quality_grade": "research", 
+        "has[]": "sounds", 
+        "verifiable": True,
+        "quality_grade": "research,needs_id", # <--- THE FIX: Includes both grades
         "per_page": limit, 
         "order_by": "count", "order": "desc"
     }
@@ -95,6 +97,7 @@ def get_wild_by_class(place_id, taxon_id, limit):
     return species_list
 
 def get_domestic(place_id):
+    """Gets up to 10 domestic animals for the continent"""
     species_list = []
     url = "https://api.inaturalist.org/v1/observations/species_counts"
     for sci_name, yt_search in DOMESTIC_TAXA.items():
@@ -136,7 +139,7 @@ def download_youtube_audio(animal_name, search_query, save_folder, max_files):
     try:
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future = executor.submit(run_download)
-            future.result(timeout=300)
+            future.result(timeout=300) # 5-minute timeout
     except: pass
 
     # Clean up any crashed downloads post-attempt
@@ -151,7 +154,7 @@ def download_youtube_audio(animal_name, search_query, save_folder, max_files):
 # ==========================================
 def main():
     print("=" * 60)
-    print("CLEAN SLATE STRICT QUOTA DATABASE BUILDER")
+    print("FINAL STRICT QUOTA DATABASE BUILDER")
     print("=" * 60)
     
     # PRE-CLEAN: Delete the old database folder if it exists
@@ -161,6 +164,7 @@ def main():
         time.sleep(1)
         
     print("Target: 12 Birds, 3 Amphibians, 2 Reptiles, 3 Mammals, 10 Domestic")
+    print("Quality Grade: Research + Needs ID")
     print("Starting fresh from scratch...\n")
 
     total_downloaded = 0
@@ -205,6 +209,7 @@ def main():
             
             icon = "🏠" if animal_category == "Domestic" else "🦁"
             
+            # Descriptive Print Block
             print(f"  {icon} [{idx+1}/{len(master_list)}] {com_name} ({animal_class})")
             print(f"      🔍 Searching: \"{yt_search}\"", end=" ... ")
             
@@ -234,7 +239,7 @@ def main():
             else:
                 print(f"\n      ❌ FAILED: No suitable videos found.")
                     
-            time.sleep(random.uniform(5, 10))
+            time.sleep(random.uniform(2, 5))
 
     print("\n" + "=" * 60)
     print(f"🎉 COMPLETE! Total files downloaded: {total_downloaded}")
