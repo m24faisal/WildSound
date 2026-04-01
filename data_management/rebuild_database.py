@@ -1,8 +1,7 @@
-# build_youtube_continental_database.py
+# build_strict_quotas.py
 """
-COMPLETE YOUTUBE DATABASE BUILDER
-- Wild Animals: Searches "Animal Name sound vocalization"
-- Domestic Animals: Searches specific noise ("Dog barking sound")
+STRICT QUOTA DATABASE BUILDER
+Enforces exactly: 12 Birds, 3 Amphibians, 2 Reptiles, 3 Mammals, 10 Domestic per continent.
 """
 
 import requests
@@ -32,7 +31,27 @@ CONTINENTS = {
     "oceania": 97393
 }
 
-# Domestic animals still need specific verbs to avoid videos of sleeping animals
+# Iconic Taxon IDs for iNaturalist API
+TAXON_BIRDS = 3
+TAXON_AMPHIBIANS = 209
+TAXON_REPTILES = 260
+TAXON_MAMMALS = 40151
+
+# Our strict quotas to equal exactly 20 wild animals
+QUOTAS = {
+    TAXON_BIRDS: 12,
+    TAXON_AMPHIBIANS: 3,
+    TAXON_REPTILES: 2,
+    TAXON_MAMMALS: 3
+}
+
+CLASS_NAMES = {
+    TAXON_BIRDS: "Aves",
+    TAXON_AMPHIBIANS: "Amphibia",
+    TAXON_REPTILES: "Reptilia",
+    TAXON_MAMMALS: "Mammalia"
+}
+
 DOMESTIC_TAXA = {
     "Canis lupus familiaris": "Dog barking sound",
     "Felis catus": "Cat meowing sound",
@@ -46,56 +65,61 @@ DOMESTIC_TAXA = {
     "Meleagris gallopavo": "Turkey gobbling sound"
 }
 
-MAX_WILD = 20
-MAX_DOMESTIC = 10
-MAX_YOUTUBE_FILES = 5 
+MAX_FILES = 5 
 
 # ==========================================
-# STEP 1: INATURALIST (Get the List)
+# STEP 1: INATURALIST GETTERS
 # ==========================================
-def get_exact_species_list(place_id):
+def get_wild_by_class(place_id, taxon_id, limit):
+    """Forces iNaturalist to return exactly 'limit' animals of a specific class"""
     species_list = []
     url = "https://api.inaturalist.org/v1/observations/species_counts"
-    
-    params_wild = {
-        "place_id": place_id, "has[]": "sounds", "verifiable": True,
-        "quality_grade": "research", "per_page": MAX_WILD, 
+    params = {
+        "place_id": place_id, 
+        "taxon_id": taxon_id,      # THE MAGIC FILTER: Forces Aves, Mammalia, etc.
+        "has[]": "sounds", "verifiable": True,
+        "quality_grade": "research", 
+        "per_page": limit, 
         "order_by": "count", "order": "desc"
     }
     try:
-        response = requests.get(url, params=params_wild, headers=HEADERS, timeout=15)
+        response = requests.get(url, params=params, headers=HEADERS, timeout=15)
         data = response.json()
-        for result in data.get('results', [])[:MAX_WILD]:
+        for result in data.get('results', [])[:limit]:
             taxon = result.get('taxon', {})
             sci_name = taxon.get('name', '')
             com_name = taxon.get('preferred_common_name', sci_name).title()
-            animal_class = taxon.get('iconic_taxon_name', 'Unknown') 
             if sci_name and com_name and com_name != 'Unknown':
-                species_list.append({'scientific': sci_name, 'common': com_name, 'category': 'Wild', 'class': animal_class})
+                species_list.append({'common': com_name, 'class': CLASS_NAMES[taxon_id]})
     except: pass
+    return species_list
 
-    for sci_name, search_term in list(DOMESTIC_TAXA.items())[:MAX_DOMESTIC]:
-        com_name = search_term.split()[0] 
-        params_dom = {"taxon_name": sci_name, "place_id": place_id, "has[]": "sounds", "verifiable": True, "per_page": 1}
+def get_domestic(place_id):
+    """Gets up to 10 domestic animals for the continent"""
+    species_list = []
+    url = "https://api.inaturalist.org/v1/observations/species_counts"
+    for sci_name, yt_search in DOMESTIC_TAXA.items():
+        params = {"taxon_name": sci_name, "place_id": place_id, "has[]": "sounds", "verifiable": True, "per_page": 1}
         try:
-            response = requests.get(url, params=params_dom, headers=HEADERS, timeout=15)
-            data = response.json()
-            if data.get('total_results', 0) > 0:
-                species_list.append({'scientific': sci_name, 'common': com_name, 'category': 'Domestic', 'class': 'Domestic'})
-            time.sleep(0.2)
+            response = requests.get(url, params=params, headers=HEADERS, timeout=10)
+            if response.json().get('total_results', 0) > 0:
+                com_name = yt_search.split()[0]
+                species_list.append({'common': com_name, 'class': 'Domestic', 'yt_search': yt_search})
         except: pass
-        
+        time.sleep(0.2)
     return species_list
 
 # ==========================================
 # STEP 2: YOUTUBE DOWNLOADER
 # ==========================================
 def download_youtube_audio(animal_name, search_query, save_folder, max_files):
-    """Searches 100 videos, downloads max 5, with a 300-second kill switch"""
-    
     for part_file in save_folder.glob("*.part"):
         try: part_file.unlink()
         except: pass
+
+    # SKIP LOGIC: Don't redownload if we already have 5 files
+    if len(list(save_folder.glob("*.mp3"))) >= max_files:
+        return 0 # Return 0 because we didn't download anything NEW
 
     files_before = len(list(save_folder.glob("*.mp3")))
 
@@ -105,12 +129,8 @@ def download_youtube_audio(animal_name, search_query, save_folder, max_files):
         'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192',}],
         'default_search': 'ytsearch100', 
         'max_downloads': max_files,       
-        'noplaylist': True,
-        'quiet': True,
-        'no_warnings': True,
-        'max_filesize': 10 * 1024 * 1024, 
-        'ignoreerrors': True, 
-        'socket_timeout': 20, 
+        'noplaylist': True, 'quiet': True, 'no_warnings': True,
+        'max_filesize': 10 * 1024 * 1024, 'ignoreerrors': True, 'socket_timeout': 20, 
     }
     
     def run_download():
@@ -121,24 +141,21 @@ def download_youtube_audio(animal_name, search_query, save_folder, max_files):
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future = executor.submit(run_download)
             future.result(timeout=300)
-    except concurrent.futures.TimeoutError:
-        pass
-    except Exception:
-        pass
+    except: pass
 
     for part_file in save_folder.glob("*.part"):
         try: part_file.unlink()
         except: pass
 
-    files_after = len(list(save_folder.glob("*.mp3")))
-    return files_after - files_before
+    return len(list(save_folder.glob("*.mp3"))) - files_before
 
 # ==========================================
 # MAIN EXECUTION
 # ==========================================
 def main():
     print("=" * 60)
-    print("SOUND & VOCALIZATION YOUTUBE BUILDER")
+    print("STRICT QUOTA DATABASE BUILDER")
+    print("Target: 12 Birds, 3 Amphibians, 2 Reptiles, 3 Mammals, 10 Domestic")
     print("=" * 60)
 
     total_downloaded = 0
@@ -147,62 +164,55 @@ def main():
         print(f"\n🌍 {continent_name.upper()}")
         print("-" * 40)
         
-        species_list = get_exact_species_list(place_id)
-        if not species_list: continue
-            
-        wild_count = sum(1 for s in species_list if s['category'] == 'Wild')
-        dom_count = sum(1 for s in species_list if s['category'] == 'Domestic')
-        print(f"  Targeting: {wild_count} Wild | {dom_count} Domestic\n")
+        master_list = []
 
-        for idx, species in enumerate(species_list):
-            com_name = species['common']
-            animal_class = species['class']
-            animal_category = species['category']
+        # 1. Get exactly 20 WILD animals based on strict class quotas
+        for taxon_id, limit in QUOTAS.items():
+            class_name = CLASS_NAMES[taxon_id]
+            wild_animals = get_wild_by_class(place_id, taxon_id, limit)
+            for animal in wild_animals:
+                animal['category'] = 'Wild'
+                animal['yt_search'] = f"{animal['common']} sound vocalization"
+                master_list.append(animal)
+            time.sleep(0.5)
+
+        # 2. Get up to 10 DOMESTIC animals
+        domestic_animals = get_domestic(place_id)
+        for animal in domestic_animals:
+            animal['category'] = 'Domestic'
+            master_list.append(animal)
+
+        # Sort the list just to make the terminal output look nice (Birds -> Amphibians -> Reptiles -> Mammals -> Domestic)
+        class_order = {"Aves": 0, "Amphibia": 1, "Reptilia": 2, "Mammalia": 3, "Domestic": 4}
+        master_list.sort(key=lambda x: class_order.get(x['class'], 5))
+
+        print(f"  Total Target: {len(master_list)} animals\n")
+
+        # 3. DOWNLOAD THEM ALL
+        for idx, item in enumerate(master_list):
+            com_name = item['common']
+            animal_class = item['class']
+            animal_category = item['category']
+            yt_search = item.get('yt_search', f"{com_name} sound")
             
             save_folder = OUTPUT_DIR / continent_name / animal_category / animal_class / com_name
             save_folder.mkdir(parents=True, exist_ok=True)
             
             icon = "🏠" if animal_category == "Domestic" else "🦁"
+            print(f"  {icon} [{idx+1}/{len(master_list)}] {com_name} ({animal_class})", end=" ... ")
             
-            # SEARCH LOGIC
-            if animal_category == "Domestic":
-                # Use the exact specific phrase from our dictionary
-                yt_search = DOMESTIC_TAXA.get(species['scientific'], com_name)
-            else:
-                # WILD ANIMALS: Uses your exact preferred keywords
-                yt_search = f"{com_name} sound vocalization"
-
-            print(f"  {icon} [{idx+1}/{len(species_list)}] {com_name}")
-            print(f"      🔍 Searching: \"{yt_search}\"", end=" ... ")
-            
-            count = download_youtube_audio(com_name, yt_search, save_folder, MAX_YOUTUBE_FILES)
-            
-            # BACKUP SEARCH LOGIC (Only triggers if simple search fails)
-            if count == 0:
-                print(f"\n      ⚠️ Specific search failed. Trying backup...", end=" ... ")
-                
-                if animal_class == "Aves":
-                    backup_search = "Wild bird sound vocalization"
-                elif animal_class == "Amphibia":
-                    backup_search = "Wild frog sound vocalization"
-                elif animal_class == "Reptilia":
-                    backup_search = "Wild reptile sound vocalization"
-                else:
-                    backup_search = "Wild mammal sound vocalization"
-                
-                count = download_youtube_audio(com_name, backup_search, save_folder, MAX_YOUTUBE_FILES)
+            count = download_youtube_audio(com_name, yt_search, save_folder, MAX_FILES)
             
             if count > 0:
-                print(f"\n      ✅ SUCCESS: Saved {count} files.")
+                print(f"✅ {count} files")
                 total_downloaded += count
             else:
-                print(f"\n      ❌ FAILED: Could not find any audio.")
+                print(f"⏭️ Skipped (Already exists or not found)")
                     
-            human_delay = random.uniform(3, 8) 
-            time.sleep(human_delay)
+            time.sleep(random.uniform(2, 5))
 
     print("\n" + "=" * 60)
-    print(f"🎉 COMPLETE! Downloaded {total_downloaded} cleanly named files.")
+    print(f"🎉 COMPLETE! Total new files downloaded: {total_downloaded}")
     print("=" * 60)
 
 if __name__ == "__main__":
