@@ -205,7 +205,7 @@ def main():
                 print(f"\n      ❌ FAILED: All 100 videos were dead, blocked, or timed out.")
                     
             # Random delay to prevent YouTube IP bans
-            human_delay = random.uniform(3, 8) 
+            human_delay = random.uniform(5, 10) 
             time.sleep(human_delay)
 
     print("\n" + "=" * 60)
