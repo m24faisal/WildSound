@@ -262,7 +262,7 @@ def main():
             else:
                 print(f"\n      ❌ FAILED.")
                     
-            time.sleep(random.uniform(2, 5))
+            time.sleep(random.uniform(5, 10))
 
     print("\n" + "=" * 60)
     print(f"🎉 COMPLETE! Total files downloaded: {total_downloaded}")
