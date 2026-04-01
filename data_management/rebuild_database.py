@@ -1,9 +1,8 @@
 # build_youtube_continental_database.py
 """
 COMPLETE YOUTUBE DATABASE BUILDER
-- Searches Top 100 YouTube videos to bypass massive amounts of dead links.
-- Hard stops after 5 successful downloads per animal.
-- Hard 300-second (5 minute) timeout to prevent freezing on slow connections.
+- Wild Animals: Searches "Animal Name sound vocalization"
+- Domestic Animals: Searches specific noise ("Dog barking sound")
 """
 
 import requests
@@ -33,22 +32,23 @@ CONTINENTS = {
     "oceania": 97393
 }
 
+# Domestic animals still need specific verbs to avoid videos of sleeping animals
 DOMESTIC_TAXA = {
-    "Canis lupus familiaris": "Dog barking",
-    "Felis catus": "Cat meowing",
-    "Bos taurus": "Cow mooing",
-    "Equus caballus": "Horse neighing",
-    "Capra hircus": "Goat bleating",
-    "Ovis aries": "Sheep baaing",
-    "Sus scrofa domesticus": "Pig oinking",
-    "Gallus gallus domesticus": "Chicken clucking",
-    "Anas platyrhynchos domesticus": "Duck quacking",
-    "Meleagris gallopavo": "Turkey gobbling"
+    "Canis lupus familiaris": "Dog barking sound",
+    "Felis catus": "Cat meowing sound",
+    "Bos taurus": "Cow mooing sound",
+    "Equus caballus": "Horse neighing sound",
+    "Capra hircus": "Goat bleating sound",
+    "Ovis aries": "Sheep baaing sound",
+    "Sus scrofa domesticus": "Pig oinking sound",
+    "Gallus gallus domesticus": "Chicken clucking sound",
+    "Anas platyrhynchos domesticus": "Duck quacking sound",
+    "Meleagris gallopavo": "Turkey gobbling sound"
 }
 
 MAX_WILD = 20
 MAX_DOMESTIC = 10
-MAX_YOUTUBE_FILES = 5 # STRICT LIMIT: Will only save 5 files per animal
+MAX_YOUTUBE_FILES = 5 
 
 # ==========================================
 # STEP 1: INATURALIST (Get the List)
@@ -88,31 +88,23 @@ def get_exact_species_list(place_id):
     return species_list
 
 # ==========================================
-# STEP 2: YOUTUBE DOWNLOADER (DEEP SEARCH + LIMIT)
+# STEP 2: YOUTUBE DOWNLOADER
 # ==========================================
 def download_youtube_audio(animal_name, search_query, save_folder, max_files):
     """Searches 100 videos, downloads max 5, with a 300-second kill switch"""
     
-    # PRE-CLEAN: Delete any leftover .part files from previous crashed runs
     for part_file in save_folder.glob("*.part"):
-        try:
-            part_file.unlink()
-        except:
-            pass
+        try: part_file.unlink()
+        except: pass
 
-    # Count existing files
     files_before = len(list(save_folder.glob("*.mp3")))
 
     ydl_opts = {
         'format': 'bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best',
         'outtmpl': str(save_folder / f"{animal_name.replace(' ', '_')}_%(autonumber)d.%(ext)s"),
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }],
-        'default_search': 'ytsearch100', # SEARCH DEEP: Look at the top 100 YouTube results
-        'max_downloads': max_files,       # HARD LIMIT: Stop entirely after 5 successful downloads
+        'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192',}],
+        'default_search': 'ytsearch100', 
+        'max_downloads': max_files,       
         'noplaylist': True,
         'quiet': True,
         'no_warnings': True,
@@ -128,34 +120,25 @@ def download_youtube_audio(animal_name, search_query, save_folder, max_files):
     try:
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future = executor.submit(run_download)
-            # UPDATED: 300-second (5 minute) hard kill switch
             future.result(timeout=300)
-            
     except concurrent.futures.TimeoutError:
         pass
     except Exception:
         pass
 
-    # POST-CLEAN: Delete any leftover .part files
     for part_file in save_folder.glob("*.part"):
-        try:
-            part_file.unlink()
-        except:
-            pass
+        try: part_file.unlink()
+        except: pass
 
-    # Count files now to see what actually survived
     files_after = len(list(save_folder.glob("*.mp3")))
-    actual_downloads = files_after - files_before
-
-    return actual_downloads
+    return files_after - files_before
 
 # ==========================================
 # MAIN EXECUTION
 # ==========================================
 def main():
     print("=" * 60)
-    print("SMART KEYWORD YOUTUBE BUILDER (DEEP SEARCH)")
-    print("Searching Top 100 videos. Saving max 5 per animal.")
+    print("SOUND & VOCALIZATION YOUTUBE BUILDER")
     print("=" * 60)
 
     total_downloaded = 0
@@ -181,31 +164,41 @@ def main():
             
             icon = "🏠" if animal_category == "Domestic" else "🦁"
             
+            # SEARCH LOGIC
             if animal_category == "Domestic":
-                search_term = DOMESTIC_TAXA.get(species['scientific'], com_name)
-                yt_search = f"{search_term} clean sound effect"
-            elif animal_class == "Aves":
-                yt_search = f"{com_name} bird call song clean sound effect"
-            elif animal_class == "Amphibia":
-                yt_search = f"{com_name} frog toad call croaking clean sound effect"
-            elif animal_class == "Reptilia":
-                yt_search = f"{com_name} reptile hiss sound effect clean"
-            else: 
-                yt_search = f"{com_name} wild animal sound effect call clean"
+                # Use the exact specific phrase from our dictionary
+                yt_search = DOMESTIC_TAXA.get(species['scientific'], com_name)
+            else:
+                # WILD ANIMALS: Uses your exact preferred keywords
+                yt_search = f"{com_name} sound vocalization"
 
             print(f"  {icon} [{idx+1}/{len(species_list)}] {com_name}")
-            print(f"      🔍 Scanning top 100 YouTube videos...", end=" ... ")
+            print(f"      🔍 Searching: \"{yt_search}\"", end=" ... ")
             
             count = download_youtube_audio(com_name, yt_search, save_folder, MAX_YOUTUBE_FILES)
+            
+            # BACKUP SEARCH LOGIC (Only triggers if simple search fails)
+            if count == 0:
+                print(f"\n      ⚠️ Specific search failed. Trying backup...", end=" ... ")
+                
+                if animal_class == "Aves":
+                    backup_search = "Wild bird sound vocalization"
+                elif animal_class == "Amphibia":
+                    backup_search = "Wild frog sound vocalization"
+                elif animal_class == "Reptilia":
+                    backup_search = "Wild reptile sound vocalization"
+                else:
+                    backup_search = "Wild mammal sound vocalization"
+                
+                count = download_youtube_audio(com_name, backup_search, save_folder, MAX_YOUTUBE_FILES)
             
             if count > 0:
                 print(f"\n      ✅ SUCCESS: Saved {count} files.")
                 total_downloaded += count
             else:
-                print(f"\n      ❌ FAILED: All 100 videos were dead, blocked, or timed out.")
+                print(f"\n      ❌ FAILED: Could not find any audio.")
                     
-            # Random delay to prevent YouTube IP bans
-            human_delay = random.uniform(5, 10) 
+            human_delay = random.uniform(3, 8) 
             time.sleep(human_delay)
 
     print("\n" + "=" * 60)
