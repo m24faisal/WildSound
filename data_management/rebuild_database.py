@@ -1,9 +1,8 @@
 # build_strict_quotas_final.py
 """
-FINAL STRICT QUOTA DATABASE BUILDER
-- Deletes old database folder automatically.
-- Searches both "Research" and "Needs ID" grades to find elusive reptiles/amphibians.
-- Target: 12 Birds, 3 Amphibians, 2 Reptiles, 3 Mammals, 10 Domestic per continent.
+FINAL STRICT QUOTA DATABASE BUILDER (RESEARCH GRADE ID FIX)
+- Uses Quality Grade ID (1) to ensure correct animal identification.
+- Forces exactly: 12 Birds, 3 Amphibians, 2 Reptiles, 3 Mammals, 10 Domestic per continent.
 """
 
 import requests
@@ -72,32 +71,38 @@ MAX_FILES = 5
 # STEP 1: INATURALIST GETTERS
 # ==========================================
 def get_wild_by_class(place_id, taxon_id, limit):
-    """Forces iNaturalist to return exactly 'limit' animals of a specific class"""
     species_list = []
     url = "https://api.inaturalist.org/v1/observations/species_counts"
+    
     params = {
         "place_id": place_id, 
         "taxon_id": taxon_id,      
         "has[]": "sounds", 
         "verifiable": True,
-        "quality_grade": "research,needs_id", # <--- THE FIX: Includes both grades
+        "quality_grade": 1,  # THE FIX: Hardcoded ID for "Research Grade"
         "per_page": limit, 
         "order_by": "count", "order": "desc"
     }
     try:
         response = requests.get(url, params=params, headers=HEADERS, timeout=15)
         data = response.json()
+        
+        # DEBUG: Show us exactly what iNaturalist returned for this class
+        total_available = data.get('total_results', 0)
+        print(f"         [iNat API returned {total_available} total]", end=" ... ")
+        
         for result in data.get('results', [])[:limit]:
             taxon = result.get('taxon', {})
             sci_name = taxon.get('name', '')
             com_name = taxon.get('preferred_common_name', sci_name).title()
             if sci_name and com_name and com_name != 'Unknown':
                 species_list.append({'common': com_name, 'class': CLASS_NAMES[taxon_id]})
-    except: pass
+    except Exception as e:
+        print(f"         [iNat API ERROR: {e}]", end=" ... ")
+        
     return species_list
 
 def get_domestic(place_id):
-    """Gets up to 10 domestic animals for the continent"""
     species_list = []
     url = "https://api.inaturalist.org/v1/observations/species_counts"
     for sci_name, yt_search in DOMESTIC_TAXA.items():
@@ -115,16 +120,16 @@ def get_domestic(place_id):
 # STEP 2: YOUTUBE DOWNLOADER
 # ==========================================
 def download_youtube_audio(animal_name, search_query, save_folder, max_files):
-    # Clean up any crashed downloads
     for part_file in save_folder.glob("*.part"):
         try: part_file.unlink()
         except: pass
 
     files_before = len(list(save_folder.glob("*.mp3")))
+    safe_name = animal_name.replace(" ", "_")
 
     ydl_opts = {
         'format': 'bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best',
-        'outtmpl': str(save_folder / f"{animal_name.replace(' ', '_')}_%(autonumber)d.%(ext)s"),
+        'outtmpl': str(save_folder / f"{safe_name}_%(autonumber)d.%(ext)s"),
         'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192',}],
         'default_search': 'ytsearch100', 
         'max_downloads': max_files,       
@@ -137,12 +142,9 @@ def download_youtube_audio(animal_name, search_query, save_folder, max_files):
             ydl.download([search_query])
 
     try:
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(run_download)
-            future.result(timeout=300) # 5-minute timeout
+        run_download()
     except: pass
 
-    # Clean up any crashed downloads post-attempt
     for part_file in save_folder.glob("*.part"):
         try: part_file.unlink()
         except: pass
@@ -157,14 +159,12 @@ def main():
     print("FINAL STRICT QUOTA DATABASE BUILDER")
     print("=" * 60)
     
-    # PRE-CLEAN: Delete the old database folder if it exists
     if OUTPUT_DIR.exists():
         print("\n🧹 Deleting old database folder...")
         shutil.rmtree(OUTPUT_DIR)
         time.sleep(1)
         
     print("Target: 12 Birds, 3 Amphibians, 2 Reptiles, 3 Mammals, 10 Domestic")
-    print("Quality Grade: Research + Needs ID")
     print("Starting fresh from scratch...\n")
 
     total_downloaded = 0
@@ -175,69 +175,76 @@ def main():
         
         master_list = []
 
-        # 1. Get exactly 20 WILD animals based on strict class quotas
+        # 1. Get WILD animals
         for taxon_id, limit in QUOTAS.items():
             class_name = CLASS_NAMES[taxon_id]
+            print(f"  Fetching {class_name}...")
+            
             wild_animals = get_wild_by_class(place_id, taxon_id, limit)
+            
             for animal in wild_animals:
                 animal['category'] = 'Wild'
                 animal['yt_search'] = f"{animal['common']} sound vocalization"
                 master_list.append(animal)
             time.sleep(0.5)
 
-        # 2. Get up to 10 DOMESTIC animals
+        # 2. Get DOMESTIC animals
+        print(f"  Fetching Domestic...")
         domestic_animals = get_domestic(place_id)
         for animal in domestic_animals:
             animal['category'] = 'Domestic'
             master_list.append(animal)
 
-        # Sort the list (Birds -> Amphibians -> Reptiles -> Mammals -> Domestic)
+        # Sort the list
         class_order = {"Aves": 0, "Amphibia": 1, "Reptilia": 2, "Mammalia": 3, "Domestic": 4}
         master_list.sort(key=lambda x: class_order.get(x['class'], 5))
 
-        print(f"  Total Target: {len(master_list)} animals\n")
+        print(f"\n  Total Target: {len(master_list)} animals\n")
 
-        # 3. DOWNLOAD THEM ALL
+        # 3. DOWNLOAD
         for idx, item in enumerate(master_list):
             com_name = item['common']
             animal_class = item['class']
             animal_category = item['category']
             yt_search = item.get('yt_search', f"{com_name} sound")
             
-            save_folder = OUTPUT_DIR / continent_name / animal_category / animal_class / com_name
+            safe_folder_name = com_name.replace(" ", "_")
+            save_folder = OUTPUT_DIR / continent_name / animal_category / animal_class / safe_folder_name
             save_folder.mkdir(parents=True, exist_ok=True)
             
             icon = "🏠" if animal_category == "Domestic" else "🦁"
             
-            # Descriptive Print Block
             print(f"  {icon} [{idx+1}/{len(master_list)}] {com_name} ({animal_class})")
             print(f"      🔍 Searching: \"{yt_search}\"", end=" ... ")
             
-            count = download_youtube_audio(com_name, yt_search, save_folder, MAX_FILES)
+            try:
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(download_youtube_audio, com_name, yt_search, save_folder, MAX_FILES)
+                    count = future.result(timeout=300)
+            except:
+                count = 0
             
-            # BACKUP SEARCH LOGIC 
             if count == 0:
-                print(f"\n      ⚠️ Primary search failed. Trying backup...", end=" ... ")
+                print(f"\n      ⚠️ Failed. Trying backup...", end=" ... ")
                 
-                if animal_class == "Aves":
-                    backup_search = "Wild bird sound vocalization"
-                elif animal_class == "Amphibia":
-                    backup_search = "Wild frog sound vocalization"
-                elif animal_class == "Reptilia":
-                    backup_search = "Wild reptile sound vocalization"
-                elif animal_category == "Domestic":
-                    backup_search = f"{com_name} sound"
-                else: 
-                    backup_search = "Wild mammal sound vocalization"
+                if animal_class == "Aves": backup_search = "Wild bird sound vocalization"
+                elif animal_class == "Amphibia": backup_search = "Wild frog sound vocalization"
+                elif animal_class == "Reptilia": backup_search = "Wild reptile sound vocalization"
+                elif animal_category == "Domestic": backup_search = f"{com_name} sound"
+                else: backup_search = "Wild mammal sound vocalization"
                 
-                count = download_youtube_audio(com_name, backup_search, save_folder, MAX_FILES)
+                try:
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future = executor.submit(download_youtube_audio, com_name, backup_search, save_folder, MAX_FILES)
+                        count = future.result(timeout=300)
+                except:
+                    count = 0
             
-            # Descriptive Result Block
             if count > 0:
-                print(f"\n      ✅ SUCCESS: Downloaded {count} new files.")
+                print(f"\n      ✅ SUCCESS: {count} files.")
                 total_downloaded += count
             else:
-                print(f"\n      ❌ FAILED: No suitable videos found.")
+                print(f"\n      ❌ FAILED.")
                     
             time.sleep(random.uniform(5, 10))
 
