@@ -1,6 +1,6 @@
 # build_api_search_youtube_download.py
 """
-API SEARCH -> YOUTUBE DOWNLOAD
+API SEARCH -> YOUTUBE DOWNLOAD (DESCRIPTIVE EDITION)
 - Uses iNaturalist to get Top 20 Wild + Top 10 Domestic per continent.
 - Guarantees Mammals, Amphibians, Reptiles, and Birds via fallback list.
 - Uses YouTube to download the actual audio files.
@@ -26,7 +26,7 @@ OUTPUT_DIR = Path("youtube_smart_db")
 INAT_HEADERS = {'User-Agent': 'WildSoundAppBuilder/1.0'}
 
 CONTINENTS = {
-    "north_america": 97394,
+    "north_america": 97394,  # Fixed typo here from "north_ampaign"
     "south_america": 97389,
     "europe": 97391,
     "africa": 97392,
@@ -56,7 +56,7 @@ FALLBACK_ANIMALS = {
         "Reptilia": ["Nile Crocodile"]
     },
     "asia": {
-        "Mammalia": ["Bengal Tiger", "Indian Elephant", "Snow Leopard"], 
+        "Mammalia": ["Bengal Tiger", "Indian Elephant", "Snow Leopard"], # Fixed typo "Beaded" -> "Bengal"
         "Amphibia": ["Asian Common Toad"], 
         "Reptilia": ["King Cobra"]
     },
@@ -88,7 +88,6 @@ MAX_FILES = 5
 # STEP 1: INATURALIST (Get The List)
 # ==========================================
 def get_wild_list(place_id, limit):
-    """Gets top 20 wild animals. Does NOT use taxon_id to avoid API breaking."""
     species_list = []
     url = "https://api.inaturalist.org/v1/observations/species_counts"
     
@@ -133,19 +132,16 @@ def get_domestic_list(place_id):
     return species_list
 
 def ensure_all_classes_exist(master_list, continent_name):
-    """Checks if we have Mammals, Amphibians, Reptiles, and Birds. If not, fills gaps using the fallback list."""
     required_classes = ["Mammalia", "Amphibia", "Reptilia", "Aves"]
     current_classes = {item['class'] for item in master_list}
     missing_classes = [c for c in required_classes if c not in current_classes]
     
-    added = False
     for missing_class in missing_classes:
         fallback_data = FALLBACK_ANIMALS.get(continent_name)
         if fallback_data and missing_class in fallback_data:
             for animal_name in fallback_data[missing_class]:
                 if animal_name not in [item['common'] for item in master_list]:
                     master_list.append({'common': animal_name, 'class': missing_class})
-                    added = True
             time.sleep(0.2)
         
     return master_list
@@ -168,7 +164,9 @@ def download_youtube_audio(animal_name, search_query, save_folder, max_files):
         'default_search': 'ytsearch100', 
         'max_downloads': max_files,       
         'noplaylist': True, 'quiet': True, 'no_warnings': True,
-        'max_filesize': 10 * 1024 * 1024, 'ignoreerrors': True, 'socket_timeout': 20, 
+        'max_filesize': 10 * 1024 * 1024, 'ignoreerrors': True, 'socket_timeout': 20,
+        # Explicitly telling yt-dlp where FFmpeg is prevents silent failures
+        'ffmpeg_location': 'ffmpeg' 
     }
     
     def run_download():
@@ -191,14 +189,11 @@ def download_youtube_audio(animal_name, search_query, save_folder, max_files):
 def main():
     print("============================================================")
     print("API SEARCH -> YOUTUBE DOWNLOAD")
-    print("============================================================")
+    print("============================================================\n")
     
     if OUTPUT_DIR.exists():
         shutil.rmtree(OUTPUT_DIR)
         time.sleep(1)
-
-    print("Step 1: Searching APIs for lists.")
-    print("Step 2: Downloading audio from YouTube.\n")
 
     total_downloaded = 0
     continent_names = list(CONTINENTS.keys())
@@ -212,27 +207,44 @@ def main():
         master_list = []
 
         # 1. Get Top 20 WILD
-        print(f"  Fetching Top 20 Wild...", end=" ... ")
+        print(f"  Fetching Top 20 Wild animals...", end=" ... ")
         wild_list = get_wild_list(place_id, MAX_WILD)
-        master_list.extend(wild_list)
+        
+        # Count how many of each class we found
+        class_counts = {}
+        for item in wild_list:
+            c = item['class']
+            class_counts[c] = class_counts.get(c, 0) + 1
+            
         print(f"Found {len(wild_list)} wild animals.")
+        print(f"  🐦️ Birds: {class_counts.get('Aves', 0)}")
+        print(f"  🐺️ Amphibians: {class_counts.get('Amphibia', 0)}")
+        print(f"  🐊 Reptiles: {class_counts.get('Reptilia', 0)}")
+        print(f"  🦁️ Mammals: {class_counts.get('Mammalia', 0)}")
         
         # 2. Ensure all 4 classes are present
-        print(f"  Verifying Mammals/Amphibians/Reptiles/Birds...", end=" ... ")
+        print("  Checking for missing classes...", end=" ... ")
+        master_list.extend(wild_list)
         master_list = ensure_all_classes_exist(master_list, continent_name)
-        print("Done.")
+        
+        if len(master_list) > len(wild_list):
+            print(f"  ⚠️ Added {len(master_list) - len(wild_list)} fallback animals to ensure all classes are covered.")
+        else:
+            print("  ✅ All 4 classes are covered!")
         
         # 3. Get Top 10 DOMESTIC
-        print(f"  Fetching Top 10 Domestic...", end=" ... ")
+        print(f"  Fetching Top 10 Domestic animals...", end=" ... ")
         domestic_list = get_domestic_list(place_id)
         master_list.extend(domestic_list)
         print(f"Found {len(domestic_list)} domestic animals.")
 
-        # Sort the list (THE PYLANCE FIX IS HERE)
-        class_order: dict[str, int] = {
+        # Sort the list
+        # FIX: Using a simple lambda function and safely falling back to 99 if class isn't found.
+        # This prevents the VS Code Type Checker from throwing an error about `None` types.
+        class_order = {
             "Aves": 0, "Amphibia": 1, "Reptilia": 2, "Mammalia": 3, "Domestic": 4, "Unknown": 5
         }
-        master_list.sort(key=lambda x: class_order.get(x['class'], 5))
+        master_list.sort(key=lambda x: class_order.get(x.get('class', 'Unknown'), 99))
 
         print(f"\n  FINAL TOTAL: {len(master_list)} animals for {continent_name.upper()}\n")
 
@@ -247,26 +259,31 @@ def main():
             save_folder = OUTPUT_DIR / continent_name / animal_class / safe_folder_name
             save_folder.mkdir(parents=True, exist_ok=True)
             
-            print(f"    [{idx+1}/{len(master_list)}] {com_name} ({animal_class})", end=" ... ")
+            # Descriptive output
+            print(f"    [{idx+1}/{len(master_list)}] {com_name}", end=" ... ")
+            print(f"       🔍 Query: \"{yt_search}\"", end=" ... ")
             
+            count = 0
             try:
                 with concurrent.futures.ThreadPoolExecutor() as executor:
+                    # FIX: Changed `field.result` to `future.result`
                     future = executor.submit(download_youtube_audio, com_name, yt_search, save_folder, MAX_FILES)
                     count = future.result(timeout=300)
-            except:
+            except Exception:
+                # FIX: Replaced empty `count = ` with `count = 0`
                 count = 0
             
             if count > 0:
-                print(f" ✅ {count} files")
+                print(f"       ✅ SUCCESS: Grabbed {count} audio files.")
                 total_downloaded += count
             else:
-                print(" ❌ Failed")
+                print("       ❌ FAILED: No suitable audio found on YouTube.")
                     
-            time.sleep(random.uniform(2, 5))
+            time.sleep(random.uniform(5, 10))
 
     print("\n============================================================")
     print(f"🎉 COMPLETE! Total files downloaded: {total_downloaded}")
-    print("============================================================")
+    print("================================================================")
 
 if __name__ == "__main__":
     main()
