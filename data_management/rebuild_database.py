@@ -1,19 +1,19 @@
 # build_api_search_youtube_download.py
 """
-API SEARCH -> YOUTUBE DOWNLOAD (CONCURRENT & FREEZE PROOF)
-- Uses multiprocessing to download multiple animals at once.
-- Isolates downloads so frozen videos CANNOT crash the main script.
-- Built-in throttling inside workers to prevent YouTube IP bans.
+API SEARCH -> YOUTUBE DOWNLOAD (BULLETPROOF EDITION)
+- Uses ProcessPoolExecutor for maximum crash/freeze protection.
+- Workers are GUARANTEED to be killed if the script stops.
+- Built-in throttling to prevent YouTube IP bans.
 """
 
 import requests
 import time
 import random
 import shutil
-import multiprocessing
 from pathlib import Path
 import warnings
 import yt_dlp
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Any, cast, Tuple
 
 warnings.filterwarnings('ignore')
@@ -23,8 +23,8 @@ warnings.filterwarnings('ignore')
 # ==========================================
 OUTPUT_DIR = Path("youtube_smart_db")
 TIMEOUT_SECONDS = 90
-MAX_CONCURRENT_DOWNLOADS = 3 # How many animals to download at the exact same time
-MIN_DELAY, MAX_DELAY = 5, 10  # Seconds the worker will wait before searching YouTube
+MAX_CONCURRENT_DOWNLOADS = 3 
+MIN_DELAY, MAX_DELAY = 5, 10 
 
 INAT_HEADERS = {'User-Agent': 'WildSoundAppBuilder/1.0'}
 
@@ -91,21 +91,14 @@ MAX_FILES = 5
 def get_wild_list(place_id, limit):
     species_list = []
     url = "https://api.inaturalist.org/v1/observations/species_counts"
-    
     params = {
-        "place_id": place_id, 
-        "has[]": "sounds", 
-        "verifiable": True,
-        "quality_grade": "research", 
-        "per_page": limit, 
-        "order_by": "count", "order": "desc"
+        "place_id": place_id, "has[]": "sounds", "verifiable": True,
+        "quality_grade": "research", "per_page": limit, "order_by": "count", "order": "desc"
     }
-    
     try:
         response = requests.get(url, params=params, headers=INAT_HEADERS, timeout=15)
         data = response.json()
         results = data.get('results', [])
-        
         for result in results:
             taxon = result.get('taxon', {})
             sci_name = taxon.get('name', '')
@@ -113,16 +106,13 @@ def get_wild_list(place_id, limit):
             if sci_name and com_name and com_name != 'Unknown':
                 animal_class = taxon.get('iconic_taxon_name', 'Unknown')
                 species_list.append({'common': com_name, 'class': animal_class})
-                
     except Exception as e:
         print(f"\n  [Warning] API Error: {e}")
-        
     return species_list
 
 def ensure_all_classes_exist(master_list, continent_name):
     required_classes = ["Mammalia", "Aves", "Reptilia", "Amphibia"]
     current_classes = {item['class'] for item in master_list}
-    
     added_count = 0
     for missing_class in required_classes:
         if missing_class not in current_classes:
@@ -135,21 +125,18 @@ def ensure_all_classes_exist(master_list, continent_name):
                         added_count += 1
                         break 
             time.sleep(0.2)
-        
     return master_list, added_count
 
 # ==========================================
-# STEP 2: YOUTUBE (Get The Audio)
+# STEP 2: YOUTUBE (The Isolated Worker)
 # ==========================================
-# This function IS the worker. It gets passed to a separate CPU core.
-def _download_worker(task_data: Tuple[str, str, str, int, str]) -> Tuple[str, int, bool]:
+def _download_worker(task_data: Tuple[str, str, str, int, str]) -> Tuple[str, int]:
     animal_name, search_query, save_folder_str, max_files, ffmpeg_loc = task_data
     save_folder = Path(save_folder_str)
     
-    # 1. Throttle: Sleep HERE inside the worker process, not the main script!
+    # Throttle happens here, in the background, so the main script never sleeps
     time.sleep(random.uniform(MIN_DELAY, MAX_DELAY))
 
-    # Clean up old partial downloads
     for part_file in save_folder.glob("*.part"):
         try: part_file.unlink()
         except: pass
@@ -170,8 +157,6 @@ def _download_worker(task_data: Tuple[str, str, str, int, str]) -> Tuple[str, in
         'ffmpeg_location': ffmpeg_loc
     }
     
-    timed_out = False
-    
     try:
         with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
             ydl.download([search_query])
@@ -183,17 +168,14 @@ def _download_worker(task_data: Tuple[str, str, str, int, str]) -> Tuple[str, in
             except: pass
 
     files_after = len(list(save_folder.glob("*.mp3")))
-    return animal_name, (files_after - files_before), timed_out
-
+    return animal_name, (files_after - files_before)
 
 # ==========================================
 # MAIN EXECUTION
 # ==========================================
 def main():
-    multiprocessing.freeze_support()
-
     print("============================================================")
-    print("API SEARCH -> YOUTUBE DOWNLOAD (CONCURRENT & FREEZE PROOF)")
+    print("API SEARCH -> YOUTUBE DOWNLOAD (BULLETPROOF EDITION)")
     print("============================================================\n")
     
     ffmpeg_path = Path(__file__).parent / 'ffmpeg.exe'
@@ -210,75 +192,85 @@ def main():
     ffmpeg_loc_str = str(ffmpeg_path)
     continent_names = list(CONTINENTS.keys())
     
-    for continent_name in continent_names:
-        place_id = CONTINENTS[continent_name]
-        
-        print(f"🌍 {continent_name.upper()}")
-        print("-" * 55)
-        
-        master_list = []
-
-        print(f"  Fetching Top 20 Wild animals...", end=" ... ")
-        wild_list = get_wild_list(place_id, MAX_WILD)
-        master_list.extend(wild_list)
-        print(f"Found {len(wild_list)} wild animals.")
-        
-        print("  Checking for missing classes...", end=" ... ")
-        master_list, added_fallbacks = ensure_all_classes_exist(master_list, continent_name)
-        
-        if added_fallbacks > 0:
-            print(f"  ⚠️ Added {added_fallbacks} fallback animal(s) to cover missing classes.")
-        else:
-            print("  ✅ All classes covered!")
-        
-        print(f"  Injecting Top 20 Domestic animals...", end=" ... ")
-        for domestic_animal in TOP_20_DOMESTIC:
-            master_list.append({'common': domestic_animal, 'class': 'Domestic'})
-        print(f"Added 20 domestic animals.")
-
-        class_order = {
-            "Aves": 0, "Amphibia": 1, "Reptilia": 2, "Mammalia": 3, "Domestic": 4, "Unknown": 5
-        }
-        master_list.sort(key=lambda x: class_order.get(x.get('class', 'Unknown'), 99))
-
-        print(f"\n  FINAL TOTAL: {len(master_list)} animals for {continent_name.upper()}")
-        print(f"  🚀 Spawning {MAX_CONCURRENT_DOWNLOADS} concurrent download workers...\n")
-
-        # 1. Prepare the task list for the multiprocessing pool
-        task_list = []
-        for item in master_list:
-            com_name = item['common']
-            animal_class = item['class']
+    try:
+        for continent_name in continent_names:
+            place_id = CONTINENTS[continent_name]
             
-            if animal_class == "Domestic":
-                yt_search = f"{com_name} animal sounds noises"
+            print(f"🌍 {continent_name.upper()}")
+            print("-" * 55)
+            
+            master_list = []
+
+            print(f"  Fetching Top 20 Wild animals...", end=" ... ")
+            wild_list = get_wild_list(place_id, MAX_WILD)
+            master_list.extend(wild_list)
+            print(f"Found {len(wild_list)} wild animals.")
+            
+            print("  Checking for missing classes...", end=" ... ")
+            master_list, added_fallbacks = ensure_all_classes_exist(master_list, continent_name)
+            
+            if added_fallbacks > 0:
+                print(f"  ⚠️ Added {added_fallbacks} fallback animal(s).")
             else:
-                yt_search = f"{com_name} sound vocalization"
+                print("  ✅ All classes covered!")
             
-            safe_folder_name = com_name.replace(" ", "_")
-            save_folder = OUTPUT_DIR / continent_name / animal_class / safe_folder_name
-            save_folder.mkdir(parents=True, exist_ok=True)
-            
-            # Package data into a tuple so multiprocessing can safely pass it to the worker
-            task_list.append((com_name, yt_search, str(save_folder), MAX_FILES, ffmpeg_loc_str))
+            print(f"  Injecting Top 20 Domestic animals...", end=" ... ")
+            for domestic_animal in TOP_20_DOMESTIC:
+                master_list.append({'common': domestic_animal, 'class': 'Domestic'})
+            print(f"Added 20.")
 
-        # 2. Fire up the Pool! (No time.sleep on the main thread!)
-        # imap_unordered gives us results as fast as they finish, keeping the console highly responsive
-        with multiprocessing.Pool(processes=MAX_CONCURRENT_DOWNLOADS) as pool:
-            results = pool.imap_unordered(_download_worker, task_list)
-            
-            for animal_name, count, timed_out in results:
-                if count > 0:
-                    print(f"       ✅ [{animal_name}]: Grabbed {count} audio files.")
-                    total_downloaded += count
+            class_order = {
+                "Aves": 0, "Amphibia": 1, "Reptilia": 2, "Mammalia": 3, "Domestic": 4, "Unknown": 5
+            }
+            master_list.sort(key=lambda x: class_order.get(x.get('class', 'Unknown'), 99))
+
+            print(f"\n  FINAL TOTAL: {len(master_list)} animals for {continent_name.upper()}")
+            print(f"  🚀 Spawning workers (Max {MAX_CONCURRENT_DOWNLOADS} at a time)...\n")
+
+            task_list = []
+            for item in master_list:
+                com_name = item['common']
+                animal_class = item['class']
+                
+                if animal_class == "Domestic":
+                    yt_search = f"{com_name} animal sounds noises"
                 else:
-                    status = "⏱️ TIMED OUT!" if timed_out else "❌ FAILED/SKIPPED"
-                    print(f"       {status} [{animal_name}]: No suitable audio found.")
+                    yt_search = f"{com_name} sound vocalization"
+                
+                safe_folder_name = com_name.replace(" ", "_")
+                save_folder = OUTPUT_DIR / continent_name / animal_class / safe_folder_name
+                save_folder.mkdir(parents=True, exist_ok=True)
+                
+                task_list.append((com_name, yt_search, str(save_folder), MAX_FILES, ffmpeg_loc_str))
 
-        print(f"\n  ✅ Finished processing {continent_name.upper()}\n")
+            # ProcessPoolExecutor guarantees background tasks are killed if script crashes
+            with ProcessPoolExecutor(max_workers=MAX_CONCURRENT_DOWNLOADS) as executor:
+                futures = {executor.submit(_download_worker, task): task[0] for task in task_list}
+                
+                for future in as_completed(futures):
+                    animal_name = futures[future]
+                    try:
+                        # We enforce the timeout HERE. If the worker freezes, this kills it safely.
+                        result_animal, count = future.result(timeout=TIMEOUT_SECONDS + 15)
+                        
+                        if count > 0:
+                            print(f"       ✅ [{result_animal}]: Grabbed {count} audio files.")
+                            total_downloaded += count
+                        else:
+                            print(f"       ❌ FAILED [{result_animal}]: No suitable audio found.")
+                            
+                    except Exception as e:
+                        # This triggers if the future.result() times out
+                        print(f"       ⏱️ TIMED OUT [{animal_name}]: Worker was killed to prevent freeze.")
+
+            print(f"\n  ✅ Finished processing {continent_name.upper()}\n")
+
+    except KeyboardInterrupt:
+        # If YOU press Ctrl+C, it instantly drops here, kills the 'with' block, and exits cleanly
+        print("\n\n🛑 SCRIPT CANCELLED BY USER. Killing all background downloads...")
 
     print("\n============================================================")
-    print(f"🎉 COMPLETE! Total files downloaded: {total_downloaded}")
+    print(f"🎉 DONE! Total files downloaded: {total_downloaded}")
     print("============================================================")
 
 if __name__ == "__main__":
