@@ -3,7 +3,7 @@
 API SEARCH -> YOUTUBE DOWNLOAD (DESCRIPTIVE EDITION)
 - Gets Top 20 Wild animals per continent via iNaturalist API.
 - Appends Top 20 most common Domestic animals globally.
-- GUARANTEES Mammals, Birds, Reptiles, Amphibians, and Sea Creatures are included.
+- GUARANTEES Mammals, Birds, Reptiles, and Amphibians are included.
 - Uses YouTube to download the actual audio files.
 """
 
@@ -35,54 +35,47 @@ CONTINENTS = {
     "oceania": 97393
 }
 
-# Expanded fallback to include Sea Creatures (Marine Mammals, Fish, etc.)
+# Strictly Mammals, Birds, Reptiles, and Amphibians
 FALLBACK_ANIMALS = {
     "north_america": {
         "Mammalia": ["Eastern Grey Squirrel", "White-Tailed Deer", "Coyote"], 
         "Aves": ["American Robin", "Bald Eagle"],
         "Amphibia": ["Spring Peeper", "American Bullfrog"], 
-        "Reptilia": ["Rattlesnake", "American Alligator"],
-        "Actinopterygii": ["Atlantic Herring", "Common Snook"] # Ray-finned fish
+        "Reptilia": ["Rattlesnake", "American Alligator"]
     },
     "south_america": {
         "Mammalia": ["Jaguar", "Capybara", "Giant Anteater"], 
         "Aves": ["Toucan", "Harpy Eagle"],
         "Amphibia": ["Red-Eyed Tree Frog", "Poison Dart Frog"], 
-        "Reptilia": ["Green Anaconda"],
-        "Actinopterygii": ["Piranha", "Arapaima"]
+        "Reptilia": ["Green Anaconda"]
     },
     "europe": {
         "Mammalia": ["Red Fox", "Wild Boar", "Red Deer"], 
         "Aves": ["European Robin", "Common Nightingale"],
         "Amphibia": ["Common Toad"], 
-        "Reptilia": ["Grass Snake"],
-        "Actinopterygii": ["Atlantic Cod", "European Perch"]
+        "Reptilia": ["Grass Snake"]
     },
     "africa": {
         "Mammalia": ["African Elephant", "Lion", "Spotted Hyena"], 
         "Aves": ["African Grey Parrot", "Lilac-Breasted Roller"],
         "Amphibia": ["African Bullfrog"], 
-        "Reptilia": ["Nile Crocodile"],
-        "Actinopterygii": ["Great White Shark", "Coelacanth"], # Using Shark under a broader fallback umbrella
-        "Chondrichthyes": ["Great White Shark"] # Sharks/Rays
+        "Reptilia": ["Nile Crocodile"]
     },
     "asia": {
         "Mammalia": ["Bengal Tiger", "Indian Elephant", "Snow Leopard"], 
         "Aves": ["Asian Koel", "Peacock"],
         "Amphibia": ["Asian Common Toad"], 
-        "Reptilia": ["King Cobra"],
-        "Actinopterygii": ["Giant Gourami", "Whale Shark"]
+        "Reptilia": ["King Cobra"]
     },
     "oceania": {
         "Mammalia": ["Dingo", "Platypus", "Koala"], 
         "Aves": ["Kookaburra", "Superb Lyrebird"],
         "Amphibia": ["Green Tree Frog"], 
-        "Reptilia": ["Saltwater Crocodile"],
-        "Actinopterygii": ["Great Barrier Reef Fish", "Clownfish"]
+        "Reptilia": ["Saltwater Crocodile"]
     }
 }
 
-# Top 20 most common domestic animals globally (Appended to every continent)
+# Top 20 most common domestic animals globally
 TOP_20_DOMESTIC = [
     "Dog", "Cat", "Cow", "Horse", "Goat", "Sheep", "Pig", "Chicken", 
     "Duck", "Turkey", "Donkey", "Rabbit", "Guinea Pig", "Hamster", 
@@ -127,8 +120,8 @@ def get_wild_list(place_id, limit):
     return species_list
 
 def ensure_all_classes_exist(master_list, continent_name):
-    # Mammals, Birds, Reptiles, Amphibians, and Sea Creatures (Actinopterygii/Chondrichthyes)
-    required_classes = ["Mammalia", "Aves", "Reptilia", "Amphibia", "Actinopterygii", "Chondrichthyes"]
+    # Strictly checking for the 4 requested land-based classes
+    required_classes = ["Mammalia", "Aves", "Reptilia", "Amphibia"]
     current_classes = {item['class'] for item in master_list}
     
     added_count = 0
@@ -139,12 +132,9 @@ def ensure_all_classes_exist(master_list, continent_name):
                 for animal_name in fallback_data[missing_class]:
                     if animal_name not in [item['common'] for item in master_list]:
                         master_list.append({'common': animal_name, 'class': missing_class})
-                        current_classes.add(missing_class) # Prevent adding duplicates
+                        current_classes.add(missing_class)
                         added_count += 1
-                        if missing_class in ["Actinopterygii", "Chondrichthyes"]:
-                            master_list[-1]['class'] = "Sea Creature" # Rename for cleaner folder structure
-                            current_classes.add("Sea Creature")
-                        break # Only add 1 fallback per missing class to keep list manageable
+                        break # Only add 1 fallback per missing class
             time.sleep(0.2)
         
     return master_list, added_count
@@ -190,10 +180,10 @@ def download_youtube_audio(animal_name, search_query, save_folder, max_files):
 # ==========================================
 def main():
     print("============================================================")
-    print("API SEARCH -> YOUTUBE DOWNLOAD (WILD + DOMESTIC + SEA LIFE)")
+    print("API SEARCH -> YOUTUBE DOWNLOAD (WILD + DOMESTIC)")
     print("============================================================\n")
     
-    # Verify ffmpeg exists before starting the whole process
+    # Verify ffmpeg exists before starting
     ffmpeg_path = Path(__file__).parent / 'ffmpeg.exe'
     if not ffmpeg_path.exists():
         print("❌ CRITICAL ERROR: ffmpeg.exe NOT FOUND in the script directory!")
@@ -221,7 +211,7 @@ def main():
         master_list.extend(wild_list)
         print(f"Found {len(wild_list)} wild animals.")
         
-        # 2. Ensure all classes (including Sea Creatures) are present
+        # 2. Ensure all 4 classes are present
         print("  Checking for missing classes...", end=" ... ")
         master_list, added_fallbacks = ensure_all_classes_exist(master_list, continent_name)
         
@@ -238,7 +228,7 @@ def main():
 
         # Sort the list logically
         class_order = {
-            "Aves": 0, "Amphibia": 1, "Reptilia": 2, "Sea Creature": 3, "Mammalia": 4, "Domestic": 5, "Unknown": 6
+            "Aves": 0, "Amphibia": 1, "Reptilia": 2, "Mammalia": 3, "Domestic": 4, "Unknown": 5
         }
         master_list.sort(key=lambda x: class_order.get(x.get('class', 'Unknown'), 99))
 
@@ -253,8 +243,6 @@ def main():
             # Tweak search query slightly for domestic vs wild
             if animal_class == "Domestic":
                 yt_search = f"{com_name} animal sounds noises"
-            elif animal_class == "Sea Creature":
-                yt_search = f"{com_name} underwater ocean sounds"
             else:
                 yt_search = f"{com_name} sound vocalization"
             
@@ -280,7 +268,7 @@ def main():
             else:
                 print("       ❌ FAILED: No suitable audio found on YouTube.")
                     
-            time.sleep(random.uniform(2, 5))
+            time.sleep(random.uniform(5, 10))
 
     print("\n============================================================")
     print(f"🎉 COMPLETE! Total files downloaded: {total_downloaded}")
