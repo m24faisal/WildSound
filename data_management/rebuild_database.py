@@ -1,18 +1,18 @@
 # build_api_search_youtube_download.py
 """
-ULTRA-STREAMLINED YOUTUBE DOWNLOADER
-- Searches Top 10 YouTube results per animal (Fast, safe, un-crashable).
-- Top 10 Wild + Top 10 Domestic per continent.
+SAFE TOP 20 YOUTUBE SEARCH
+- Uses Windows subprocess to spawn yt-dlp entirely outside of Python.
+- If yt-dlp freezes, Windows physically kills the .exe.
+- Searches Top 20 YouTube results, but strictly limits playlist scraping to prevent freezes.
 """
 
 import requests
 import time
 import random
 import shutil
+import subprocess
 from pathlib import Path
 import warnings
-import yt_dlp
-from typing import Any, cast
 
 warnings.filterwarnings('ignore')
 
@@ -20,6 +20,7 @@ warnings.filterwarnings('ignore')
 # CONFIGURATION
 # ==========================================
 OUTPUT_DIR = Path("youtube_smart_db")
+TIMEOUT_SECONDS = 120 # Increased to 120 seconds because checking 20 videos takes longer than 5
 
 INAT_HEADERS = {'User-Agent': 'WildSoundAppBuilder/1.0'}
 
@@ -77,7 +78,7 @@ TOP_10_DOMESTIC = [
 ]
 
 MAX_WILD = 10 
-MAX_FILES = 3 
+MAX_FILES = 5 # Increased back to 5 since we have a bigger pool of 20 videos to pull from
 
 # ==========================================
 # STEP 1: INATURALIST
@@ -121,7 +122,7 @@ def ensure_all_classes_exist(master_list, continent_name):
     return master_list, added_count
 
 # ==========================================
-# STEP 2: YOUTUBE (Simple & Safe)
+# STEP 2: YOUTUBE (Via Windows Subprocess)
 # ==========================================
 def download_youtube_audio(animal_name, search_query, save_folder, max_files):
     for part_file in save_folder.glob("*.part"):
@@ -130,25 +131,37 @@ def download_youtube_audio(animal_name, search_query, save_folder, max_files):
 
     files_before = len(list(save_folder.glob("*.mp3")))
     safe_name = animal_name.replace(" ", "_")
+    outtmpl = str(save_folder / f"{safe_name}_%(autonumber)d.%(ext)s")
+    ffmpeg_loc = str(Path(__file__).parent / 'ffmpeg.exe')
 
-    ydl_opts = {
-        'format': 'bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best',
-        'outtmpl': str(save_folder / f"{safe_name}_%(autonumber)d.%(ext)s"),
-        'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192',}],
-        
-        # CHANGED: Top 10 YouTube results instead of 100
-        'default_search': 'ytsearch10', 
-        
-        'max_downloads': max_files,       
-        'noplaylist': True, 'quiet': True, 'no_warnings': True,
-        'max_filesize': 10 * 1024 * 1024, 'ignoreerrors': True, 
-        'socket_timeout': 15, 
-        'ffmpeg_location': str(Path(__file__).parent / 'ffmpeg.exe') 
-    }
-    
+    command = [
+        'yt-dlp',
+        f'--ffmpeg-location={ffmpeg_loc}',
+        '--format', 'bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best',
+        '--extract-audio', '--audio-format', 'mp3', '--audio-quality', '192',
+        '--output', outtmpl,
+        '--max-downloads', str(max_files),
+        '--playlist-end', '20',      # CRITICAL: Forces yt-dlp to stop checking after 20 videos
+        '--no-playlist',              # Prevents it from grabbing sidebars
+        '--quiet', '--no-warnings',
+        '--ignore-errors', '--max-filesize', '10M',
+        'ytsearch20:' + search_query  # Search exactly 20 videos
+    ]
+
     try:
-        with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
-            ydl.download([search_query])
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW 
+        )
+        
+        process.wait(timeout=TIMEOUT_SECONDS)
+        
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+        print("⏱️ KILLED!", end=" ... ")
     except Exception:
         pass
     finally:
@@ -163,7 +176,7 @@ def download_youtube_audio(animal_name, search_query, save_folder, max_files):
 # ==========================================
 def main():
     print("============================================================")
-    print("ULTRA-STREAMLINED YOUTUBE DOWNLOADER (TOP 10 SEARCH)")
+    print("SAFE TOP 20 YOUTUBE SEARCH")
     print("============================================================\n")
     
     ffmpeg_path = Path(__file__).parent / 'ffmpeg.exe'
