@@ -1,8 +1,9 @@
 # build_api_search_youtube_download.py
 """
 API SEARCH -> YOUTUBE DOWNLOAD (DESCRIPTIVE EDITION)
-- Uses iNaturalist to get Top 20 Wild + Top 10 Domestic per continent.
-- Guarantees Mammals, Amphibians, Reptiles, and Birds via fallback list.
+- Gets Top 20 Wild animals per continent via iNaturalist API.
+- Appends Top 20 most common Domestic animals globally.
+- GUARANTEES Mammals, Birds, Reptiles, Amphibians, and Sea Creatures are included.
 - Uses YouTube to download the actual audio files.
 """
 
@@ -26,7 +27,7 @@ OUTPUT_DIR = Path("youtube_smart_db")
 INAT_HEADERS = {'User-Agent': 'WildSoundAppBuilder/1.0'}
 
 CONTINENTS = {
-    "north_america": 97394,  # Fixed typo here from "north_ampaign"
+    "north_america": 97394,
     "south_america": 97389,
     "europe": 97391,
     "africa": 97392,
@@ -34,54 +35,61 @@ CONTINENTS = {
     "oceania": 97393
 }
 
+# Expanded fallback to include Sea Creatures (Marine Mammals, Fish, etc.)
 FALLBACK_ANIMALS = {
     "north_america": {
         "Mammalia": ["Eastern Grey Squirrel", "White-Tailed Deer", "Coyote"], 
+        "Aves": ["American Robin", "Bald Eagle"],
         "Amphibia": ["Spring Peeper", "American Bullfrog"], 
-        "Reptilia": ["Rattlesnake", "American Alligator"]
+        "Reptilia": ["Rattlesnake", "American Alligator"],
+        "Actinopterygii": ["Atlantic Herring", "Common Snook"] # Ray-finned fish
     },
     "south_america": {
         "Mammalia": ["Jaguar", "Capybara", "Giant Anteater"], 
-        "Amphibia": ["Red-Eyed Tree Frog"], 
-        "Reptilia": ["Green Anaconda"]
+        "Aves": ["Toucan", "Harpy Eagle"],
+        "Amphibia": ["Red-Eyed Tree Frog", "Poison Dart Frog"], 
+        "Reptilia": ["Green Anaconda"],
+        "Actinopterygii": ["Piranha", "Arapaima"]
     },
     "europe": {
         "Mammalia": ["Red Fox", "Wild Boar", "Red Deer"], 
+        "Aves": ["European Robin", "Common Nightingale"],
         "Amphibia": ["Common Toad"], 
-        "Reptilia": ["Grass Snake"]
+        "Reptilia": ["Grass Snake"],
+        "Actinopterygii": ["Atlantic Cod", "European Perch"]
     },
     "africa": {
         "Mammalia": ["African Elephant", "Lion", "Spotted Hyena"], 
+        "Aves": ["African Grey Parrot", "Lilac-Breasted Roller"],
         "Amphibia": ["African Bullfrog"], 
-        "Reptilia": ["Nile Crocodile"]
+        "Reptilia": ["Nile Crocodile"],
+        "Actinopterygii": ["Great White Shark", "Coelacanth"], # Using Shark under a broader fallback umbrella
+        "Chondrichthyes": ["Great White Shark"] # Sharks/Rays
     },
     "asia": {
-        "Mammalia": ["Bengal Tiger", "Indian Elephant", "Snow Leopard"], # Fixed typo "Beaded" -> "Bengal"
+        "Mammalia": ["Bengal Tiger", "Indian Elephant", "Snow Leopard"], 
+        "Aves": ["Asian Koel", "Peacock"],
         "Amphibia": ["Asian Common Toad"], 
-        "Reptilia": ["King Cobra"]
+        "Reptilia": ["King Cobra"],
+        "Actinopterygii": ["Giant Gourami", "Whale Shark"]
     },
     "oceania": {
         "Mammalia": ["Dingo", "Platypus", "Koala"], 
+        "Aves": ["Kookaburra", "Superb Lyrebird"],
         "Amphibia": ["Green Tree Frog"], 
-        "Reptilia": ["Saltwater Crocodile"]
+        "Reptilia": ["Saltwater Crocodile"],
+        "Actinopterygii": ["Great Barrier Reef Fish", "Clownfish"]
     }
 }
 
-DOMESTIC_TAXA = {
-    "Canis lupus familiaris": "Dog",
-    "Felis catus": "Cat",
-    "Bos taurus": "Cow",
-    "Equus caballus": "Horse",
-    "Capra hircus": "Goat",
-    "Ovis aries": "Sheep",
-    "Sus scrofa domesticus": "Pig",
-    "Gallus gallus domesticus": "Chicken",
-    "Anas platyrhynchos domesticus": "Duck",
-    "Meleagris gallopavo": "Turkey"
-}
+# Top 20 most common domestic animals globally (Appended to every continent)
+TOP_20_DOMESTIC = [
+    "Dog", "Cat", "Cow", "Horse", "Goat", "Sheep", "Pig", "Chicken", 
+    "Duck", "Turkey", "Donkey", "Rabbit", "Guinea Pig", "Hamster", 
+    "Canary", "Pigeon", "Goose", "Alpaca", "Camel", "Bee"
+]
 
 MAX_WILD = 20
-MAX_DOMESTIC = 10
 MAX_FILES = 5 
 
 # ==========================================
@@ -113,38 +121,33 @@ def get_wild_list(place_id, limit):
                 animal_class = taxon.get('iconic_taxon_name', 'Unknown')
                 species_list.append({'common': com_name, 'class': animal_class})
                 
-    except:
-        pass
+    except Exception as e:
+        print(f"\n  [Warning] API Error: {e}")
         
-    return species_list
-
-def get_domestic_list(place_id):
-    species_list = []
-    url = "https://api.inaturalist.org/v1/observations/species_counts"
-    for sci_name, com_name in DOMESTIC_TAXA.items():
-        params = {"taxon_name": sci_name, "place_id": place_id, "has[]": "sounds", "verifiable": True, "per_page": 1}
-        try:
-            response = requests.get(url, params=params, headers=INAT_HEADERS, timeout=10)
-            if response.json().get('total_results', 0) > 0:
-                species_list.append({'common': com_name, 'class': 'Domestic'})
-        except: pass
-        time.sleep(0.2)
     return species_list
 
 def ensure_all_classes_exist(master_list, continent_name):
-    required_classes = ["Mammalia", "Amphibia", "Reptilia", "Aves"]
+    # Mammals, Birds, Reptiles, Amphibians, and Sea Creatures (Actinopterygii/Chondrichthyes)
+    required_classes = ["Mammalia", "Aves", "Reptilia", "Amphibia", "Actinopterygii", "Chondrichthyes"]
     current_classes = {item['class'] for item in master_list}
-    missing_classes = [c for c in required_classes if c not in current_classes]
     
-    for missing_class in missing_classes:
-        fallback_data = FALLBACK_ANIMALS.get(continent_name)
-        if fallback_data and missing_class in fallback_data:
-            for animal_name in fallback_data[missing_class]:
-                if animal_name not in [item['common'] for item in master_list]:
-                    master_list.append({'common': animal_name, 'class': missing_class})
+    added_count = 0
+    for missing_class in required_classes:
+        if missing_class not in current_classes:
+            fallback_data = FALLBACK_ANIMALS.get(continent_name)
+            if fallback_data and missing_class in fallback_data:
+                for animal_name in fallback_data[missing_class]:
+                    if animal_name not in [item['common'] for item in master_list]:
+                        master_list.append({'common': animal_name, 'class': missing_class})
+                        current_classes.add(missing_class) # Prevent adding duplicates
+                        added_count += 1
+                        if missing_class in ["Actinopterygii", "Chondrichthyes"]:
+                            master_list[-1]['class'] = "Sea Creature" # Rename for cleaner folder structure
+                            current_classes.add("Sea Creature")
+                        break # Only add 1 fallback per missing class to keep list manageable
             time.sleep(0.2)
         
-    return master_list
+    return master_list, added_count
 
 # ==========================================
 # STEP 2: YOUTUBE (Get The Audio)
@@ -165,7 +168,6 @@ def download_youtube_audio(animal_name, search_query, save_folder, max_files):
         'max_downloads': max_files,       
         'noplaylist': True, 'quiet': True, 'no_warnings': True,
         'max_filesize': 10 * 1024 * 1024, 'ignoreerrors': True, 'socket_timeout': 20,
-        # Explicitly telling yt-dlp where FFmpeg is prevents silent failures
         'ffmpeg_location': str(Path(__file__).parent / 'ffmpeg.exe') 
     }
     
@@ -188,9 +190,16 @@ def download_youtube_audio(animal_name, search_query, save_folder, max_files):
 # ==========================================
 def main():
     print("============================================================")
-    print("API SEARCH -> YOUTUBE DOWNLOAD")
+    print("API SEARCH -> YOUTUBE DOWNLOAD (WILD + DOMESTIC + SEA LIFE)")
     print("============================================================\n")
     
+    # Verify ffmpeg exists before starting the whole process
+    ffmpeg_path = Path(__file__).parent / 'ffmpeg.exe'
+    if not ffmpeg_path.exists():
+        print("❌ CRITICAL ERROR: ffmpeg.exe NOT FOUND in the script directory!")
+        print(f"   Expected it here: {ffmpeg_path}")
+        return
+
     if OUTPUT_DIR.exists():
         shutil.rmtree(OUTPUT_DIR)
         time.sleep(1)
@@ -202,47 +211,34 @@ def main():
         place_id = CONTINENTS[continent_name]
         
         print(f"🌍 {continent_name.upper()}")
-        print("-" * 40)
+        print("-" * 55)
         
         master_list = []
 
         # 1. Get Top 20 WILD
         print(f"  Fetching Top 20 Wild animals...", end=" ... ")
         wild_list = get_wild_list(place_id, MAX_WILD)
-        
-        # Count how many of each class we found
-        class_counts = {}
-        for item in wild_list:
-            c = item['class']
-            class_counts[c] = class_counts.get(c, 0) + 1
-            
-        print(f"Found {len(wild_list)} wild animals.")
-        print(f"  🐦️ Birds: {class_counts.get('Aves', 0)}")
-        print(f"  🐺️ Amphibians: {class_counts.get('Amphibia', 0)}")
-        print(f"  🐊 Reptiles: {class_counts.get('Reptilia', 0)}")
-        print(f"  🦁️ Mammals: {class_counts.get('Mammalia', 0)}")
-        
-        # 2. Ensure all 4 classes are present
-        print("  Checking for missing classes...", end=" ... ")
         master_list.extend(wild_list)
-        master_list = ensure_all_classes_exist(master_list, continent_name)
+        print(f"Found {len(wild_list)} wild animals.")
         
-        if len(master_list) > len(wild_list):
-            print(f"  ⚠️ Added {len(master_list) - len(wild_list)} fallback animals to ensure all classes are covered.")
+        # 2. Ensure all classes (including Sea Creatures) are present
+        print("  Checking for missing classes...", end=" ... ")
+        master_list, added_fallbacks = ensure_all_classes_exist(master_list, continent_name)
+        
+        if added_fallbacks > 0:
+            print(f"  ⚠️ Added {added_fallbacks} fallback animal(s) to cover missing classes.")
         else:
-            print("  ✅ All 4 classes are covered!")
+            print("  ✅ All classes covered!")
         
-        # 3. Get Top 10 DOMESTIC
-        print(f"  Fetching Top 10 Domestic animals...", end=" ... ")
-        domestic_list = get_domestic_list(place_id)
-        master_list.extend(domestic_list)
-        print(f"Found {len(domestic_list)} domestic animals.")
+        # 3. Inject Top 20 DOMESTIC
+        print(f"  Injecting Top 20 Domestic animals...", end=" ... ")
+        for domestic_animal in TOP_20_DOMESTIC:
+            master_list.append({'common': domestic_animal, 'class': 'Domestic'})
+        print(f"Added 20 domestic animals.")
 
-        # Sort the list
-        # FIX: Using a simple lambda function and safely falling back to 99 if class isn't found.
-        # This prevents the VS Code Type Checker from throwing an error about `None` types.
+        # Sort the list logically
         class_order = {
-            "Aves": 0, "Amphibia": 1, "Reptilia": 2, "Mammalia": 3, "Domestic": 4, "Unknown": 5
+            "Aves": 0, "Amphibia": 1, "Reptilia": 2, "Sea Creature": 3, "Mammalia": 4, "Domestic": 5, "Unknown": 6
         }
         master_list.sort(key=lambda x: class_order.get(x.get('class', 'Unknown'), 99))
 
@@ -253,7 +249,14 @@ def main():
         for idx, item in enumerate(master_list):
             com_name = item['common']
             animal_class = item['class']
-            yt_search = f"{com_name} sound vocalization"
+            
+            # Tweak search query slightly for domestic vs wild
+            if animal_class == "Domestic":
+                yt_search = f"{com_name} animal sounds noises"
+            elif animal_class == "Sea Creature":
+                yt_search = f"{com_name} underwater ocean sounds"
+            else:
+                yt_search = f"{com_name} sound vocalization"
             
             safe_folder_name = com_name.replace(" ", "_")
             save_folder = OUTPUT_DIR / continent_name / animal_class / safe_folder_name
@@ -266,11 +269,9 @@ def main():
             count = 0
             try:
                 with concurrent.futures.ThreadPoolExecutor() as executor:
-                    # FIX: Changed `field.result` to `future.result`
                     future = executor.submit(download_youtube_audio, com_name, yt_search, save_folder, MAX_FILES)
                     count = future.result(timeout=300)
             except Exception:
-                # FIX: Replaced empty `count = ` with `count = 0`
                 count = 0
             
             if count > 0:
@@ -279,11 +280,11 @@ def main():
             else:
                 print("       ❌ FAILED: No suitable audio found on YouTube.")
                     
-            time.sleep(random.uniform(5, 10))
+            time.sleep(random.uniform(2, 5))
 
     print("\n============================================================")
     print(f"🎉 COMPLETE! Total files downloaded: {total_downloaded}")
-    print("================================================================")
+    print("============================================================")
 
 if __name__ == "__main__":
     main()
