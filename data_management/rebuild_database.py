@@ -1,9 +1,10 @@
 # build_api_search_youtube_download.py
 """
-API SEARCH -> YOUTUBE DOWNLOAD (BULLETPROOF EDITION)
-- Uses ProcessPoolExecutor for maximum crash/freeze protection.
-- Workers are GUARANTEED to be killed if the script stops.
-- Built-in throttling to prevent YouTube IP bans.
+API SEARCH -> YOUTUBE DOWNLOAD (STREAMLINED & SAFE)
+- Gets Top 10 Wild animals per continent via iNaturalist API.
+- Appends Top 10 most common Domestic animals globally.
+- GUARANTEES Mammals, Birds, Reptiles, and Amphibians are included for Wild.
+- Removed problematic insects (e.g., Bees) that cause yt-dlp to freeze on large files.
 """
 
 import requests
@@ -24,7 +25,7 @@ warnings.filterwarnings('ignore')
 OUTPUT_DIR = Path("youtube_smart_db")
 TIMEOUT_SECONDS = 90
 MAX_CONCURRENT_DOWNLOADS = 3 
-MIN_DELAY, MAX_DELAY = 5, 10 
+MIN_DELAY, MAX_DELAY = 5, 10 # Safe 5 to 10 second delay
 
 INAT_HEADERS = {'User-Agent': 'WildSoundAppBuilder/1.0'}
 
@@ -76,13 +77,13 @@ FALLBACK_ANIMALS = {
     }
 }
 
-TOP_20_DOMESTIC = [
-    "Dog", "Cat", "Cow", "Horse", "Goat", "Sheep", "Pig", "Chicken", 
-    "Duck", "Turkey", "Donkey", "Rabbit", "Guinea Pig", "Hamster", 
-    "Canary", "Pigeon", "Goose", "Alpaca", "Camel", "Bee"
+# Top 10 most common domestic animals (Removed Bee to prevent freezing on huge files)
+TOP_10_DOMESTIC = [
+    "Dog", "Cat", "Cow", "Horse", "Goat", 
+    "Sheep", "Pig", "Chicken", "Duck", "Turkey"
 ]
 
-MAX_WILD = 20
+MAX_WILD = 10  # Reduced to 10
 MAX_FILES = 5 
 
 # ==========================================
@@ -134,7 +135,7 @@ def _download_worker(task_data: Tuple[str, str, str, int, str]) -> Tuple[str, in
     animal_name, search_query, save_folder_str, max_files, ffmpeg_loc = task_data
     save_folder = Path(save_folder_str)
     
-    # Throttle happens here, in the background, so the main script never sleeps
+    # Throttle happens here safely in the background
     time.sleep(random.uniform(MIN_DELAY, MAX_DELAY))
 
     for part_file in save_folder.glob("*.part"):
@@ -175,7 +176,7 @@ def _download_worker(task_data: Tuple[str, str, str, int, str]) -> Tuple[str, in
 # ==========================================
 def main():
     print("============================================================")
-    print("API SEARCH -> YOUTUBE DOWNLOAD (BULLETPROOF EDITION)")
+    print("API SEARCH -> YOUTUBE DOWNLOAD (STREAMLINED & SAFE)")
     print("============================================================\n")
     
     ffmpeg_path = Path(__file__).parent / 'ffmpeg.exe'
@@ -201,12 +202,14 @@ def main():
             
             master_list = []
 
-            print(f"  Fetching Top 20 Wild animals...", end=" ... ")
+            # 1. Get Top 10 WILD
+            print(f"  Fetching Top 10 Wild animals...", end=" ... ")
             wild_list = get_wild_list(place_id, MAX_WILD)
             master_list.extend(wild_list)
             print(f"Found {len(wild_list)} wild animals.")
             
-            print("  Checking for missing classes...", end=" ... ")
+            # 2. Ensure all 4 classes are present
+            print("  Checking for missing wild classes...", end=" ... ")
             master_list, added_fallbacks = ensure_all_classes_exist(master_list, continent_name)
             
             if added_fallbacks > 0:
@@ -214,11 +217,13 @@ def main():
             else:
                 print("  ✅ All classes covered!")
             
-            print(f"  Injecting Top 20 Domestic animals...", end=" ... ")
-            for domestic_animal in TOP_20_DOMESTIC:
+            # 3. Inject Top 10 DOMESTIC
+            print(f"  Injecting Top 10 Domestic animals...", end=" ... ")
+            for domestic_animal in TOP_10_DOMESTIC:
                 master_list.append({'common': domestic_animal, 'class': 'Domestic'})
-            print(f"Added 20.")
+            print(f"Added 10.")
 
+            # Sort the list
             class_order = {
                 "Aves": 0, "Amphibia": 1, "Reptilia": 2, "Mammalia": 3, "Domestic": 4, "Unknown": 5
             }
@@ -227,6 +232,7 @@ def main():
             print(f"\n  FINAL TOTAL: {len(master_list)} animals for {continent_name.upper()}")
             print(f"  🚀 Spawning workers (Max {MAX_CONCURRENT_DOWNLOADS} at a time)...\n")
 
+            # Prepare task list
             task_list = []
             for item in master_list:
                 com_name = item['common']
@@ -243,14 +249,13 @@ def main():
                 
                 task_list.append((com_name, yt_search, str(save_folder), MAX_FILES, ffmpeg_loc_str))
 
-            # ProcessPoolExecutor guarantees background tasks are killed if script crashes
+            # Execute concurrently
             with ProcessPoolExecutor(max_workers=MAX_CONCURRENT_DOWNLOADS) as executor:
                 futures = {executor.submit(_download_worker, task): task[0] for task in task_list}
                 
                 for future in as_completed(futures):
                     animal_name = futures[future]
                     try:
-                        # We enforce the timeout HERE. If the worker freezes, this kills it safely.
                         result_animal, count = future.result(timeout=TIMEOUT_SECONDS + 15)
                         
                         if count > 0:
@@ -260,13 +265,11 @@ def main():
                             print(f"       ❌ FAILED [{result_animal}]: No suitable audio found.")
                             
                     except Exception as e:
-                        # This triggers if the future.result() times out
                         print(f"       ⏱️ TIMED OUT [{animal_name}]: Worker was killed to prevent freeze.")
 
             print(f"\n  ✅ Finished processing {continent_name.upper()}\n")
 
     except KeyboardInterrupt:
-        # If YOU press Ctrl+C, it instantly drops here, kills the 'with' block, and exits cleanly
         print("\n\n🛑 SCRIPT CANCELLED BY USER. Killing all background downloads...")
 
     print("\n============================================================")
