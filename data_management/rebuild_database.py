@@ -166,7 +166,7 @@ def download_youtube_audio(animal_name, search_query, save_folder, max_files):
         'noplaylist': True, 'quiet': True, 'no_warnings': True,
         'max_filesize': 10 * 1024 * 1024, 'ignoreerrors': True, 'socket_timeout': 20,
         # Explicitly telling yt-dlp where FFmpeg is prevents silent failures
-        'ffmpeg_location': 'ffmpeg' 
+        'ffmpeg_location': str(Path(__file__).parent / 'ffmpeg.exe') 
     }
     
     def run_download():
