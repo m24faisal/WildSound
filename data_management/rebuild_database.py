@@ -1,21 +1,20 @@
 # build_api_search_youtube_download.py
 """
-API SEARCH -> YOUTUBE DOWNLOAD (DESCRIPTIVE EDITION)
-- Gets Top 20 Wild animals per continent via iNaturalist API.
-- Appends Top 20 most common Domestic animals globally.
-- GUARANTEES Mammals, Birds, Reptiles, and Amphibians are included.
-- Uses YouTube to download the actual audio files.
+API SEARCH -> YOUTUBE DOWNLOAD (CONCURRENT & FREEZE PROOF)
+- Uses multiprocessing to download multiple animals at once.
+- Isolates downloads so frozen videos CANNOT crash the main script.
+- Built-in throttling inside workers to prevent YouTube IP bans.
 """
 
 import requests
 import time
 import random
-import concurrent.futures
 import shutil
+import multiprocessing
 from pathlib import Path
 import warnings
 import yt_dlp
-from typing import Any, cast
+from typing import Any, cast, Tuple
 
 warnings.filterwarnings('ignore')
 
@@ -23,6 +22,9 @@ warnings.filterwarnings('ignore')
 # CONFIGURATION
 # ==========================================
 OUTPUT_DIR = Path("youtube_smart_db")
+TIMEOUT_SECONDS = 90
+MAX_CONCURRENT_DOWNLOADS = 3 # How many animals to download at the exact same time
+MIN_DELAY, MAX_DELAY = 5, 10  # Seconds the worker will wait before searching YouTube
 
 INAT_HEADERS = {'User-Agent': 'WildSoundAppBuilder/1.0'}
 
@@ -35,7 +37,6 @@ CONTINENTS = {
     "oceania": 97393
 }
 
-# Strictly Mammals, Birds, Reptiles, and Amphibians
 FALLBACK_ANIMALS = {
     "north_america": {
         "Mammalia": ["Eastern Grey Squirrel", "White-Tailed Deer", "Coyote"], 
@@ -75,7 +76,6 @@ FALLBACK_ANIMALS = {
     }
 }
 
-# Top 20 most common domestic animals globally
 TOP_20_DOMESTIC = [
     "Dog", "Cat", "Cow", "Horse", "Goat", "Sheep", "Pig", "Chicken", 
     "Duck", "Turkey", "Donkey", "Rabbit", "Guinea Pig", "Hamster", 
@@ -120,7 +120,6 @@ def get_wild_list(place_id, limit):
     return species_list
 
 def ensure_all_classes_exist(master_list, continent_name):
-    # Strictly checking for the 4 requested land-based classes
     required_classes = ["Mammalia", "Aves", "Reptilia", "Amphibia"]
     current_classes = {item['class'] for item in master_list}
     
@@ -134,7 +133,7 @@ def ensure_all_classes_exist(master_list, continent_name):
                         master_list.append({'common': animal_name, 'class': missing_class})
                         current_classes.add(missing_class)
                         added_count += 1
-                        break # Only add 1 fallback per missing class
+                        break 
             time.sleep(0.2)
         
     return master_list, added_count
@@ -142,14 +141,23 @@ def ensure_all_classes_exist(master_list, continent_name):
 # ==========================================
 # STEP 2: YOUTUBE (Get The Audio)
 # ==========================================
-def download_youtube_audio(animal_name, search_query, save_folder, max_files):
+# This function IS the worker. It gets passed to a separate CPU core.
+def _download_worker(task_data: Tuple[str, str, str, int, str]) -> Tuple[str, int, bool]:
+    animal_name, search_query, save_folder_str, max_files, ffmpeg_loc = task_data
+    save_folder = Path(save_folder_str)
+    
+    # 1. Throttle: Sleep HERE inside the worker process, not the main script!
+    time.sleep(random.uniform(MIN_DELAY, MAX_DELAY))
+
+    # Clean up old partial downloads
     for part_file in save_folder.glob("*.part"):
         try: part_file.unlink()
         except: pass
 
     files_before = len(list(save_folder.glob("*.mp3")))
     safe_name = animal_name.replace(" ", "_")
-
+    
+    http_headers = {'timeout': str(TIMEOUT_SECONDS)}
     ydl_opts = {
         'format': 'bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best',
         'outtmpl': str(save_folder / f"{safe_name}_%(autonumber)d.%(ext)s"),
@@ -157,33 +165,37 @@ def download_youtube_audio(animal_name, search_query, save_folder, max_files):
         'default_search': 'ytsearch100', 
         'max_downloads': max_files,       
         'noplaylist': True, 'quiet': True, 'no_warnings': True,
-        'max_filesize': 10 * 1024 * 1024, 'ignoreerrors': True, 'socket_timeout': 20,
-        'ffmpeg_location': str(Path(__file__).parent / 'ffmpeg.exe') 
+        'max_filesize': 10 * 1024 * 1024, 'ignoreerrors': True, 
+        'http_headers': http_headers,
+        'ffmpeg_location': ffmpeg_loc
     }
     
-    def run_download():
+    timed_out = False
+    
+    try:
         with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
             ydl.download([search_query])
+    except Exception:
+        pass
+    finally:
+        for part_file in save_folder.glob("*.part"):
+            try: part_file.unlink()
+            except: pass
 
-    try:
-        run_download()
-    except: pass
+    files_after = len(list(save_folder.glob("*.mp3")))
+    return animal_name, (files_after - files_before), timed_out
 
-    for part_file in save_folder.glob("*.part"):
-        try: part_file.unlink()
-        except: pass
-
-    return len(list(save_folder.glob("*.mp3"))) - files_before
 
 # ==========================================
 # MAIN EXECUTION
 # ==========================================
 def main():
+    multiprocessing.freeze_support()
+
     print("============================================================")
-    print("API SEARCH -> YOUTUBE DOWNLOAD (WILD + DOMESTIC)")
+    print("API SEARCH -> YOUTUBE DOWNLOAD (CONCURRENT & FREEZE PROOF)")
     print("============================================================\n")
     
-    # Verify ffmpeg exists before starting
     ffmpeg_path = Path(__file__).parent / 'ffmpeg.exe'
     if not ffmpeg_path.exists():
         print("❌ CRITICAL ERROR: ffmpeg.exe NOT FOUND in the script directory!")
@@ -195,6 +207,7 @@ def main():
         time.sleep(1)
 
     total_downloaded = 0
+    ffmpeg_loc_str = str(ffmpeg_path)
     continent_names = list(CONTINENTS.keys())
     
     for continent_name in continent_names:
@@ -205,13 +218,11 @@ def main():
         
         master_list = []
 
-        # 1. Get Top 20 WILD
         print(f"  Fetching Top 20 Wild animals...", end=" ... ")
         wild_list = get_wild_list(place_id, MAX_WILD)
         master_list.extend(wild_list)
         print(f"Found {len(wild_list)} wild animals.")
         
-        # 2. Ensure all 4 classes are present
         print("  Checking for missing classes...", end=" ... ")
         master_list, added_fallbacks = ensure_all_classes_exist(master_list, continent_name)
         
@@ -220,27 +231,25 @@ def main():
         else:
             print("  ✅ All classes covered!")
         
-        # 3. Inject Top 20 DOMESTIC
         print(f"  Injecting Top 20 Domestic animals...", end=" ... ")
         for domestic_animal in TOP_20_DOMESTIC:
             master_list.append({'common': domestic_animal, 'class': 'Domestic'})
         print(f"Added 20 domestic animals.")
 
-        # Sort the list logically
         class_order = {
             "Aves": 0, "Amphibia": 1, "Reptilia": 2, "Mammalia": 3, "Domestic": 4, "Unknown": 5
         }
         master_list.sort(key=lambda x: class_order.get(x.get('class', 'Unknown'), 99))
 
-        print(f"\n  FINAL TOTAL: {len(master_list)} animals for {continent_name.upper()}\n")
+        print(f"\n  FINAL TOTAL: {len(master_list)} animals for {continent_name.upper()}")
+        print(f"  🚀 Spawning {MAX_CONCURRENT_DOWNLOADS} concurrent download workers...\n")
 
-        # 4. DOWNLOAD FROM YOUTUBE
-        print("  Downloading from YouTube:")
-        for idx, item in enumerate(master_list):
+        # 1. Prepare the task list for the multiprocessing pool
+        task_list = []
+        for item in master_list:
             com_name = item['common']
             animal_class = item['class']
             
-            # Tweak search query slightly for domestic vs wild
             if animal_class == "Domestic":
                 yt_search = f"{com_name} animal sounds noises"
             else:
@@ -250,25 +259,23 @@ def main():
             save_folder = OUTPUT_DIR / continent_name / animal_class / safe_folder_name
             save_folder.mkdir(parents=True, exist_ok=True)
             
-            # Descriptive output
-            print(f"    [{idx+1}/{len(master_list)}] {com_name}", end=" ... ")
-            print(f"       🔍 Query: \"{yt_search}\"", end=" ... ")
+            # Package data into a tuple so multiprocessing can safely pass it to the worker
+            task_list.append((com_name, yt_search, str(save_folder), MAX_FILES, ffmpeg_loc_str))
+
+        # 2. Fire up the Pool! (No time.sleep on the main thread!)
+        # imap_unordered gives us results as fast as they finish, keeping the console highly responsive
+        with multiprocessing.Pool(processes=MAX_CONCURRENT_DOWNLOADS) as pool:
+            results = pool.imap_unordered(_download_worker, task_list)
             
-            count = 0
-            try:
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(download_youtube_audio, com_name, yt_search, save_folder, MAX_FILES)
-                    count = future.result(timeout=300)
-            except Exception:
-                count = 0
-            
-            if count > 0:
-                print(f"       ✅ SUCCESS: Grabbed {count} audio files.")
-                total_downloaded += count
-            else:
-                print("       ❌ FAILED: No suitable audio found on YouTube.")
-                    
-            time.sleep(random.uniform(5, 10))
+            for animal_name, count, timed_out in results:
+                if count > 0:
+                    print(f"       ✅ [{animal_name}]: Grabbed {count} audio files.")
+                    total_downloaded += count
+                else:
+                    status = "⏱️ TIMED OUT!" if timed_out else "❌ FAILED/SKIPPED"
+                    print(f"       {status} [{animal_name}]: No suitable audio found.")
+
+        print(f"\n  ✅ Finished processing {continent_name.upper()}\n")
 
     print("\n============================================================")
     print(f"🎉 COMPLETE! Total files downloaded: {total_downloaded}")
